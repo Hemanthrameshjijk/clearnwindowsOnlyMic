@@ -1,0 +1,36 @@
+[package]
+name = "driver-transport"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+# Standalone verification tool - NOT part of the ClearNAI product path.
+# Opens the shared section a running `clearnairt.exe` writes into and
+# dumps captured audio to a real WAV file, to prove the cross-process
+# transport works independent of Voicemeeter/any virtual audio driver.
+# See this crate's `src/bin/transport_reader.rs` for what it actually does
+# and does not prove.
+name = "transport-reader"
+path = "src/bin/transport_reader.rs"
+required-features = ["reader-tool"]
+
+[features]
+reader-tool = ["dep:hound"]
+
+[dependencies]
+dsp-core = { path = "../dsp-core" }
+anyhow = "1"
+hound = { version = "3.5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Named shared-memory section (`CreateFileMappingW`/`MapViewOfFile`) - the
+# same kind of named kernel object a future ClearNAI virtual audio driver
+# would open from kernel mode (`ZwOpenSection`) to read this side's writes.
+# Portable/no-op on non-Windows so this crate still `cargo check`s there,
+# matching every other crate in this workspace's "portable unless it truly
+# must touch an OS API" pattern.
+windows = { version = "0.62", features = [
+    "Win32_System_Memory",
+    "Win32_Foundation",
+    "Win32_Security",
+] }

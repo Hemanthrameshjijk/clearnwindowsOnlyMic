@@ -1,0 +1,258 @@
+//! Windows OS-audio boundary for the voice engine: WASAPI mic capture,
+//! hardware render, loopback tap, and device enumeration (incl. VB-Audio
+//! Virtual Cable endpoint discovery).
+//!
+//! Everything that actually calls into WASAPI is gated `#[cfg(windows)]`
+//! (transitively, via the `wasapi` dependency only being pulled in under
+//! `cfg(windows)` in Cargo.toml). The device-name substring matching in
+//! `devices` is OS-independent and always compiled/tested.
+//!
+//! None of this crate's WASAPI-facing code has been exercised against real
+//! audio hardware from this development environment (Linux, no Windows
+//! machine available) - it has only been type-checked against the `wasapi`
+//! crate's public API via `cargo check --target x86_64-pc-windows-gnu`.
+
+pub mod capture;
+pub mod devices;
+pub mod loopback;
+pub mod mmcss;
+pub mod render;
+
+use std::sync::OnceLock;
+
+/// Where this crate's fatal/warning-level messages go. Every worker thread
+/// here (`capture`/`render`/`loopback`) previously used a bare `eprintln!`
+/// for these, which is silently discarded in this app: `main.rs` builds with
+/// `#![windows_subsystem = "windows"]`, so the process has no console and
+/// stderr goes nowhere. That made every real failure mode this crate can hit
+/// (a WASAPI device disappearing, an event wait timing out, a write to a
+/// dead device) invisible - the worker thread would simply exit, the
+/// pipeline thread on the other end of its ring buffer would spin forever
+/// logging "buffer full, dropping frame" (a real, misleadingly-generic
+/// symptom this exact gap caused), and nobody could tell why.
+///
+/// `set_error_sink` lets the app crate redirect these into its own
+/// file-backed logger (`app::logging::log_error!`) instead - see
+/// `main()`. Falls back to `eprintln!` (harmless on Linux dev builds/tests,
+/// where there's a real console) if never set.
+static ERROR_SINK: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+
+/// Registers where this crate's error/warning messages should go. Must be
+/// called (if at all) before any capture/render/loopback thread starts -
+/// safe to call at most once; later calls are silently ignored (matching
+/// `OnceLock` semantics), which is fine since this app only ever calls it
+/// once, at startup.
+pub fn set_error_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = ERROR_SINK.set(Box::new(sink));
+}
+
+pub(crate) fn report_error(msg: &str) {
+    match ERROR_SINK.get() {
+        Some(sink) => sink(msg),
+        None => eprintln!("{msg}"),
+    }
+}
+
+/// How long a worker thread (`capture`/`render`/`loopback`) waits before
+/// retrying after its WASAPI session dies (device removed/disabled, sleep/
+/// wake, exclusive-mode contention) - see each module's reconnect loop.
+/// Long enough not to spam retries against a device that's genuinely gone,
+/// short enough that the app recovers audio within a couple of seconds of
+/// the real device coming back.
+pub(crate) const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Sleeps for `duration`, but wakes early (in short slices) to check
+/// `stop_flag` - so a worker thread's reconnect backoff never delays
+/// shutdown by more than a fraction of a second.
+pub(crate) fn sleep_respecting_stop(duration: std::time::Duration, stop_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let slice = std::time::Duration::from_millis(100);
+    let mut remaining = duration;
+    while remaining > std::time::Duration::ZERO {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let step = remaining.min(slice);
+        std::thread::sleep(step);
+        remaining -= step;
+    }
+}
+
+/// Initializes COM (STA, not MTA) on the *calling* thread. Every
+/// `capture.rs`/`render.rs`/`loopback.rs` worker thread already calls
+/// `wasapi::initialize_mta()` internally before touching WASAPI — that part
+/// is fine, those are dedicated audio threads with no GUI/OLE involvement.
+/// But each of those modules' `start_default()`/`start_by_name()` entry
+/// points *also* run a "does a matching device exist" pre-check with
+/// `DeviceEnumerator` on the **caller's** thread before ever spawning the
+/// worker thread, and `devices::list_render_devices`/`list_capture_devices`/
+/// `find_vb_cable_endpoints` (used directly by the GUI's device pickers) run
+/// entirely on the caller's thread with no worker thread at all. In this
+/// app, "the caller's thread" for all of that is the **main/GUI thread**.
+///
+/// COM apartment state is per-thread: initializing it inside a spawned
+/// worker thread does nothing for the thread that spawned it. Real hardware
+/// testing surfaced two conflicting gaps here, in order:
+///
+/// 1. First, calling nothing at all on the main thread: `CoInitialize has
+///    not been called (0x800401F0)` on both the device-enumeration-for-
+///    GUI-pickers path and the "starting default mic capture" pre-check
+///    path.
+/// 2. After fixing (1) by calling `wasapi::initialize_mta()` here: a new,
+///    different real-hardware crash, `OleInitialize failed! Result was:
+///    'RPC_E_CHANGED_MODE'`, from deep inside `winit` (which `iced` uses for
+///    window creation) — `OleInitialize` (needed for the window's
+///    drag-and-drop support) hard-requires an **STA** apartment, and once a
+///    thread has committed to MTA, a later `OleInitialize` on that same
+///    thread fails outright rather than being silently compatible. Since
+///    this app's main thread both runs the GUI event loop *and* does the
+///    WASAPI pre-checks above, it must pick the apartment model the GUI
+///    needs (STA) — WASAPI's core interfaces (`IMMDeviceEnumerator`,
+///    `IMMDevice`, `IAudioClient`) are documented as apartment-agnostic, so
+///    STA works fine for the device-enumeration/pre-check calls made from
+///    here too. Worker threads calling `initialize_mta()` on their own,
+///    separate threads remain unaffected either way.
+///
+/// Safe to call more than once on the same thread with the same apartment
+/// type (COM reference-counts nested compatible `CoInitializeEx` calls,
+/// including the one `winit`/`OleInitialize` performs internally afterward).
+/// Logs a warning rather than swallowing a genuine failure - deliberately
+/// not propagated as an `Err` since a caller failing to start over this
+/// would be worse than proceeding and letting the real WASAPI call
+/// downstream fail with its own, more specific error.
+#[cfg(windows)]
+pub fn initialize_com_for_this_thread() {
+    let hr = wasapi::initialize_sta();
+    if hr.is_err() {
+        report_error(&format!("[audio-io] WARNING: CoInitializeEx(STA) on this thread returned {hr:?}"));
+    }
+}
+
+/// The single WASAPI wire format used for every stream this crate opens:
+/// 32-bit float, mono, at `dsp_core::SAMPLE_RATE_HZ`. We rely on WASAPI
+/// shared-mode `autoconvert` (see `wasapi::StreamMode::EventsShared`) to
+/// handle any resampling/channel-mixing between this and whatever a given
+/// device's actual mix format is, so the rest of the pipeline (built around
+/// `dsp_core::FRAME_SAMPLES` @ `SAMPLE_RATE_HZ`) never has to know about it.
+#[cfg(windows)]
+pub(crate) fn engine_wave_format() -> wasapi::WaveFormat {
+    wasapi::WaveFormat::new(
+        32,
+        32,
+        &wasapi::SampleType::Float,
+        dsp_core::SAMPLE_RATE_HZ as usize,
+        1,
+        None,
+    )
+}
+
+/// Requested WASAPI shared-mode buffer duration, in 100-nanosecond units
+/// (the unit `wasapi::StreamMode::EventsShared::buffer_duration_hns`
+/// expects), sized to exactly `dsp_core::FRAME_SAMPLES` (480 samples) at
+/// `dsp_core::SAMPLE_RATE_HZ` (48kHz) = 10ms = 100_000 hns.
+///
+/// # Why this is requested explicitly instead of using `get_device_period()`
+///
+/// The reference Linux port (`clearnai-pipewire`) hit a real, measured bug
+/// on PipeWire: without an explicit buffer-size parameter sent at
+/// stream-connect time, the OS silently handed the stream a fixed 256ms
+/// (12288-sample) buffer regardless of what any consumer requested — a
+/// `node.latency` *property* string alone did nothing; only an explicit
+/// `SPA_PARAM_Buffers` object at connect time actually constrained it (see
+/// `clearnai-pipewire/src/format.rs::fixed_buffer_size_param` and
+/// `virtual_mic.rs`'s "LATENCY FIX" comment for the measured before/after).
+///
+/// `capture.rs`/`render.rs`/`loopback.rs` previously used whatever
+/// `AudioClient::get_device_period()` returned as `buffer_duration_hns`
+/// (its `min_period` value) rather than requesting our own 10ms figure —
+/// i.e. exactly the "trust the OS default" pattern that bit the reference
+/// project on PipeWire. WASAPI's `EventsShared` mode already accepts an
+/// explicit requested duration, so all three call `initialize_client` with
+/// this constant instead, mirroring the lesson learned there: ask for the
+/// buffer size the pipeline actually needs, don't assume the platform
+/// default matches it.
+///
+/// This is speculative defense, not a verified fix: nobody has run this
+/// against real WASAPI hardware from this Linux development environment,
+/// so it is unconfirmed whether WASAPI shared-mode ever exhibits the
+/// analogous "ignores the request" behavior PipeWire did. Explicitly
+/// requesting 10ms is the correct thing to do regardless (it's what the
+/// pipeline needs), but its *effectiveness* at actually getting a 480-frame
+/// buffer on real hardware is unverified — see
+/// `warn_if_buffer_size_mismatched` below for the runtime check that
+/// surfaces it if the negotiated size doesn't match.
+#[cfg(windows)]
+pub(crate) const REQUESTED_BUFFER_DURATION_HNS: i64 =
+    (dsp_core::FRAME_SAMPLES as i64 * 10_000_000) / dsp_core::SAMPLE_RATE_HZ as i64;
+
+/// Right after `initialize_client()` (and before `start_stream()`), call
+/// this with the just-initialized `AudioClient` to see what WASAPI actually
+/// negotiated via `get_buffer_size()`.
+///
+/// Real hardware finding (confirmed against actual logs, not speculative
+/// any more): this platform routinely negotiates a buffer size that is
+/// *not* `dsp_core::FRAME_SAMPLES` (480) or even a clean multiple/divisor of
+/// it (observed: 1056, 1058). That is not a bug and does not need a fix -
+/// `capture.rs`/`render.rs`/`loopback.rs`'s accumulators work sample-by-
+/// sample (a `pending: Vec<f32>` filled one sample at a time, never in
+/// packet-aligned chunks), so they already handle *any* WASAPI packet size
+/// correctly, arbitrary or not. An earlier version of this function treated
+/// a non-clean-multiple size as alarming (`[ERROR] WARNING: ... may behave
+/// unexpectedly`) - that was inaccurate to what the code actually does, so
+/// it's logged here as a plain one-time informational note instead: useful
+/// for diagnostics (e.g. spotting an unusually large period that *would*
+/// genuinely hurt latency), not something to fix in code, and not
+/// implying anything is broken.
+#[cfg(windows)]
+pub(crate) fn warn_if_buffer_size_mismatched(audio_client: &wasapi::AudioClient, stream_label: &str) {
+    match audio_client.get_buffer_size() {
+        Ok(actual_frames) => {
+            let actual = actual_frames as usize;
+            let expected = dsp_core::FRAME_SAMPLES;
+            if actual != expected {
+                crate::report_error(&format!(
+                    "[audio-io] INFO: {stream_label} negotiated a WASAPI buffer of {actual} \
+                     frames (requested {REQUESTED_BUFFER_DURATION_HNS} hns / {expected} frames). \
+                     Handled transparently by this crate's sample-level accumulator - no action \
+                     needed."
+                ));
+            }
+        }
+        Err(e) => {
+            report_error(&format!(
+                "[audio-io] WARNING: could not query negotiated WASAPI buffer size for \
+                 {stream_label} to verify it matches the requested 10ms/{} frames: {e:#}",
+                dsp_core::FRAME_SAMPLES
+            ));
+        }
+    }
+}
+
+/// Byte<->f32 helpers shared by capture/render/loopback for shuffling
+/// samples in/out of the `VecDeque<u8>` buffers the `wasapi` crate's
+/// `read_from_device_to_deque` / `write_to_device_from_deque` use.
+#[cfg(windows)]
+pub(crate) mod bytes {
+    use std::collections::VecDeque;
+
+    /// Pops one little-endian f32 sample off the front of `q`. Returns
+    /// `None` if fewer than 4 bytes remain (caller should stop draining).
+    pub fn pop_f32_le(q: &mut VecDeque<u8>) -> Option<f32> {
+        if q.len() < 4 {
+            return None;
+        }
+        let raw = [
+            q.pop_front().unwrap(),
+            q.pop_front().unwrap(),
+            q.pop_front().unwrap(),
+            q.pop_front().unwrap(),
+        ];
+        Some(f32::from_le_bytes(raw))
+    }
+
+    /// Appends one f32 sample to the back of `q` as little-endian bytes.
+    pub fn push_f32_le(q: &mut VecDeque<u8>, sample: f32) {
+        for b in sample.to_le_bytes() {
+            q.push_back(b);
+        }
+    }
+}
