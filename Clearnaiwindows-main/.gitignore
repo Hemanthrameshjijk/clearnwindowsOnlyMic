@@ -1,3 +1,25 @@
 target/
 *.pdb
 !/app/assets/*.dll
+
+# TSE research environment (Python/PyTorch, cloned candidate repos, large
+# downloaded checkpoints) - deliberately kept isolated from the production
+# Rust crates and never committed. See docs/TSE_MODEL_RESEARCH.md.
+research/tse/venv/
+research/tse/candidates/*/
+research/tse/checkpoints/*.pt
+research/tse/checkpoints/*.zip
+research/tse/checkpoints/*.onnx
+
+# Third-party VB-CABLE installer, bundled locally into installer.nsi for a
+# personal, non-commercial build only (see installer.nsi's own comments on
+# why this must never be committed or reused for a distributed build -
+# VB-Audio's license doesn't grant redistribution rights for that case).
+app/vendor/
+
+# Original TSE model POC/verification scratch (Python fixtures, exported
+# ONNX/weight blobs, WAV test data) - real production copies of everything
+# needed at runtime already live in crates/tse-bsrnn/assets/ and
+# crates/bvc-vanta/assets/; this ~190MB directory is redundant research
+# trail, not shippable product.
+poc/

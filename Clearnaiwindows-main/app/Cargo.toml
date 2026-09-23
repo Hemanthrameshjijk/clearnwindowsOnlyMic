@@ -33,6 +33,31 @@ audio-io = { path = "../crates/audio-io" }
 # real and tested before the harder kernel-mode half is attempted.
 driver-transport = { path = "../crates/driver-transport" }
 
+# Speaker-reference-enrollment subsystem (see docs/TSE_ENROLLMENT.md):
+# `speaker-profile` is the portable target-speaker-profile data type plus
+# the lock-free store the realtime TSE stage reads from; `enrollment` is the
+# non-realtime recording/VAD/encoder-calling state machine; `tse-engine` is
+# the BVC backend-selection router (Off/Hush/TSE) plus the TSE backend
+# trait and its `dsp_core::Stage` adapter. None of these are Windows-only -
+# they build and test natively on any platform, same as `dsp-core` itself.
+speaker-profile = { path = "../crates/speaker-profile" }
+speaker-encoder = { path = "../crates/speaker-encoder" }
+enrollment = { path = "../crates/enrollment" }
+tse-engine = { path = "../crates/tse-engine" }
+
+# Real BSRNN-based streaming TSE backend (REAL-TSE/WeSep spk_emb_causal_100,
+# verified in poc/real_tse/ before this port - see that directory's
+# README.md/results.md for the real measurements, and tse-bsrnn's own crate
+# docs for what's verified vs. known-not-yet-fixed, particularly its
+# real-time performance gap).
+tse-bsrnn = { path = "../crates/tse-bsrnn" }
+
+# Vanta (Conv-TasNet + ECAPA-TDNN) target-speaker-extraction backend - see
+# that crate's docs for full honest status (real trained weights, but a
+# genuinely weak model; ECAPA runtime needs onnxruntime.dll shipped
+# alongside the app).
+bvc-vanta = { path = "../crates/bvc-vanta" }
+
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -56,6 +81,8 @@ iced = { version = "0.14", features = ["tokio"] }
 # Only for the `analyze_wav` diagnostic example - not part of the product
 # binary, does not affect `clearnairt.exe`'s own dependency set.
 hound = "3.5"
+# Only for the `fbank_verify` diagnostic example.
+kaldi-native-fbank = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 # Only needed for `setup.rs`'s real Windows compatibility checks:

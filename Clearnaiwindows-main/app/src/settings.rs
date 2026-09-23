@@ -16,6 +16,15 @@ use std::path::PathBuf;
 pub struct Settings {
     /// "RNNoise (between Mic and Virtual Mic)" - default ON.
     pub mic_noise_on: bool,
+    /// "Voice Gate (suppress quiet background voices)" - a cheap, real-time
+    /// volume-based alternative to full speaker-targeted extraction (see
+    /// `dsp_core::VoiceGateStage`'s docs); default OFF, since it's a new,
+    /// unvalidated-against-real-hardware feature that changes what the
+    /// user hears in a way the existing, already-tuned stages don't -
+    /// `#[serde(default)]` so an existing `settings.json` without this key
+    /// still deserializes cleanly, defaulting to the same off behavior.
+    #[serde(default)]
+    pub mic_voice_gate_on: bool,
     /// "BVC (after Noise)" - default ON *if BVC is available at startup*;
     /// forced off (and the GUI toggle disabled) otherwise. This stored value
     /// is the user's preference and is honored again next launch if BVC
@@ -92,6 +101,34 @@ pub struct Settings {
     /// all, regardless of `monitor_enabled`.
     #[serde(default)]
     pub monitor_device_id: Option<String>,
+    /// WASAPI render-device id "Play Recording" (the enrollment playback
+    /// button) plays into. `None` means the system default output device
+    /// - e.g. whatever the user's Bluetooth headset happens to be, if it's
+    /// currently the Windows default, which is real, observed behavior
+    /// this field exists specifically to let the user override. Unlike
+    /// `monitor_device_id`, this is read fresh on each "Play Recording"
+    /// click (see `engine::play_recorded_audio`) rather than driving a
+    /// live, continuously-running render stream, so no live-switch
+    /// plumbing is needed for it.
+    #[serde(default)]
+    pub recording_playback_device_id: Option<String>,
+    /// Which BVC backend is selected for the mic path - Off/Hush/TSE (see
+    /// `tse_engine::BvcBackend`), encoded the same "plain `u8` index"
+    /// way `mic_studio_preset` already is. Default `1` (Hush), matching
+    /// this project's previous behavior (BVC was always Hush, just
+    /// on/off) - an existing user's saved `mic_bvc_on` preference is
+    /// still honored for whether Hush actually runs (see `EngineHandles`);
+    /// this field only decides *which* backend an "on" BVC toggle means.
+    /// TSE (index `2`) is a real, selectable option in the GUI, but
+    /// currently always falls back to pass-through audio because no real
+    /// TSE model is integrated yet - see `tse_engine::UnavailableTse`'s docs.
+    #[serde(default = "default_bvc_backend")]
+    pub mic_bvc_backend: u8,
+    /// Reference sentence shown during "Record Voice Reference" enrollment.
+    /// Configurable so a future localized build (or a user who wants a
+    /// sentence more natural to say) isn't stuck with the hardcoded default.
+    #[serde(default = "default_reference_sentence")]
+    pub reference_sentence: String,
     /// Set once the user has explicitly clicked "Continue"/"Skip" past the
     /// first-run setup screen while a compatibility check was failing.
     /// Suppresses re-showing the setup screen for *that* reason on
@@ -113,10 +150,19 @@ fn default_studio_preset() -> u8 {
     1 // Natural
 }
 
+fn default_bvc_backend() -> u8 {
+    tse_engine::BvcBackend::Hush.to_index()
+}
+
+fn default_reference_sentence() -> String {
+    enrollment::DEFAULT_REFERENCE_SENTENCE.to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             mic_noise_on: true,
+            mic_voice_gate_on: false,
             mic_bvc_on: true,
             mic_studio_on: true,
             mic_studio_preset: default_studio_preset(),
@@ -131,6 +177,9 @@ impl Default for Settings {
             physical_mic_device_id: None,
             monitor_enabled: false,
             monitor_device_id: None,
+            recording_playback_device_id: None,
+            mic_bvc_backend: default_bvc_backend(),
+            reference_sentence: default_reference_sentence(),
             setup_acknowledged: false,
         }
     }
@@ -215,7 +264,43 @@ mod tests {
         assert!(s.physical_mic_device_id.is_none(), "physical mic device defaults to auto/default");
         assert!(!s.monitor_enabled, "monitor path defaults OFF");
         assert!(s.monitor_device_id.is_none());
+        assert_eq!(
+            s.mic_bvc_backend,
+            tse_engine::BvcBackend::Hush.to_index(),
+            "BVC backend defaults to Hush, matching this project's previous (pre-TSE) behavior"
+        );
+        assert_eq!(s.reference_sentence, enrollment::DEFAULT_REFERENCE_SENTENCE);
         assert!(!s.setup_acknowledged, "setup screen must not be pre-acknowledged by default");
+    }
+
+    #[test]
+    fn settings_json_from_before_tse_fields_existed_still_loads() {
+        // Simulates a real settings.json written before this task added
+        // `mic_bvc_backend`/`reference_sentence` - must still deserialize
+        // via `#[serde(default)]`, falling back to Hush/the built-in
+        // sentence rather than losing every other saved preference.
+        let json = r#"{
+            "mic_noise_on": true,
+            "mic_bvc_on": true,
+            "mic_studio_on": true,
+            "aec_on": false,
+            "speaker_tap_on": true,
+            "virtual_mic_target_id": null,
+            "virtual_speaker_source_id": null
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("old-format settings.json must still parse");
+        assert_eq!(s.mic_bvc_backend, tse_engine::BvcBackend::Hush.to_index());
+        assert_eq!(s.reference_sentence, enrollment::DEFAULT_REFERENCE_SENTENCE);
+    }
+
+    #[test]
+    fn round_trips_bvc_backend_and_reference_sentence_through_json() {
+        let mut s = Settings::default();
+        s.mic_bvc_backend = tse_engine::BvcBackend::Tse.to_index();
+        s.reference_sentence = "A custom sentence.".to_string();
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: Settings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(s, back);
     }
 
     #[test]

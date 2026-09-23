@@ -53,6 +53,15 @@ const EMBEDDED_DLL_BYTES: &[u8] = include_bytes!("../assets/weya_nc.dll");
 /// `df_dec.onnx`/`config.ini`/`version.txt`.
 const EMBEDDED_MODEL_BYTES: &[u8] = include_bytes!("../assets/advanced_dfnet16k_model_best_onnx.tar.gz");
 
+/// The official onnxruntime Windows x64 shared library (v1.19.2, from
+/// Microsoft's own `microsoft/onnxruntime` GitHub Releases), embedded
+/// directly into this binary from `app/assets/onnxruntime.dll` - needed
+/// only by `bvc_vanta::ecapa::VantaSpeakerEncoder` (the `ort` crate's
+/// `load-dynamic` mode; see that module's docs for why this model can't
+/// use `tract-onnx` like every other bundled model here). Same
+/// self-extraction pattern as `EMBEDDED_DLL_BYTES` above.
+const EMBEDDED_ONNXRUNTIME_DLL_BYTES: &[u8] = include_bytes!("../assets/onnxruntime.dll");
+
 /// Result of the one-time, fast system compatibility check run at every
 /// launch (cheap enough to always redo, unlike the model download).
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +241,13 @@ pub fn speaker_dll_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(bvc_hush::SPEAKER_DLL_FILE_NAME)
 }
 
+/// Where `onnxruntime.dll` lives once extracted: under `app_data_dir()` -
+/// this is the `dll_dir` `bvc_vanta::ecapa::VantaSpeakerEncoder::try_load`
+/// is called with.
+pub fn onnxruntime_dll_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(bvc_vanta::ecapa::DLL_FILE_NAME)
+}
+
 /// True only if the real bundle file exists, is non-empty, and its size
 /// matches the embedded bytes - i.e. `ensure_bvc_assets_extracted` has
 /// already run successfully against this directory. A zero-byte, partial,
@@ -272,6 +288,8 @@ pub struct ExtractionOutcome {
     /// `speaker_dll_path`.
     pub speaker_dll: AssetState,
     pub model: AssetState,
+    /// `onnxruntime.dll` - see `onnxruntime_dll_path`.
+    pub onnxruntime_dll: AssetState,
 }
 
 impl ExtractionOutcome {
@@ -283,6 +301,7 @@ impl ExtractionOutcome {
         self.dll == AssetState::Extracted
             || self.speaker_dll == AssetState::Extracted
             || self.model == AssetState::Extracted
+            || self.onnxruntime_dll == AssetState::Extracted
     }
 }
 
@@ -367,7 +386,9 @@ pub fn ensure_bvc_assets_extracted(target_dir: &Path) -> anyhow::Result<Extracti
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::SPEAKER_DLL_FILE_NAME))?;
     let model = extract_one_if_needed(&model_bundle_path(target_dir), EMBEDDED_MODEL_BYTES)
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::MODEL_BUNDLE_FILE_NAME))?;
-    Ok(ExtractionOutcome { dll, speaker_dll, model })
+    let onnxruntime_dll = extract_one_if_needed(&onnxruntime_dll_path(target_dir), EMBEDDED_ONNXRUNTIME_DLL_BYTES)
+        .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_vanta::ecapa::DLL_FILE_NAME))?;
+    Ok(ExtractionOutcome { dll, speaker_dll, model, onnxruntime_dll })
 }
 
 #[cfg(test)]
@@ -438,6 +459,7 @@ mod tests {
         assert_eq!(outcome.dll, AssetState::Extracted);
         assert_eq!(outcome.speaker_dll, AssetState::Extracted);
         assert_eq!(outcome.model, AssetState::Extracted);
+        assert_eq!(outcome.onnxruntime_dll, AssetState::Extracted);
         assert!(outcome.wrote_anything());
 
         let dll_meta = std::fs::metadata(dll_path(&dir)).unwrap();
@@ -446,6 +468,8 @@ mod tests {
         assert_eq!(speaker_dll_meta.len(), EMBEDDED_DLL_BYTES.len() as u64);
         let model_meta = std::fs::metadata(model_bundle_path(&dir)).unwrap();
         assert_eq!(model_meta.len(), EMBEDDED_MODEL_BYTES.len() as u64);
+        let onnxruntime_meta = std::fs::metadata(onnxruntime_dll_path(&dir)).unwrap();
+        assert_eq!(onnxruntime_meta.len(), EMBEDDED_ONNXRUNTIME_DLL_BYTES.len() as u64);
 
         // No leftover `.part` files after a successful extraction.
         assert!(!dll_path(&dir).with_extension("dll.part").exists());
@@ -462,11 +486,13 @@ mod tests {
         assert_eq!(first.dll, AssetState::Extracted);
         assert_eq!(first.speaker_dll, AssetState::Extracted);
         assert_eq!(first.model, AssetState::Extracted);
+        assert_eq!(first.onnxruntime_dll, AssetState::Extracted);
 
         let second = ensure_bvc_assets_extracted(&dir).expect("second extraction must succeed");
         assert_eq!(second.dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
         assert_eq!(second.speaker_dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
         assert_eq!(second.model, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
+        assert_eq!(second.onnxruntime_dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
         assert!(!second.wrote_anything());
 
         std::fs::remove_dir_all(&dir).ok();

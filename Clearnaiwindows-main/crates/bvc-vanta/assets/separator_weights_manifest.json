@@ -1,0 +1,2426 @@
+{
+  "in_norm.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 0,
+    "length": 512
+  },
+  "in_norm.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2048,
+    "length": 512
+  },
+  "in_proj.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 4096,
+    "length": 65536
+  },
+  "in_proj.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 266240,
+    "length": 128
+  },
+  "speaker_proj.weight": {
+    "shape": [
+      128,
+      192
+    ],
+    "offset": 266752,
+    "length": 24576
+  },
+  "speaker_proj.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 365056,
+    "length": 128
+  },
+  "blocks.0.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 365568,
+    "length": 65536
+  },
+  "blocks.0.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 627712,
+    "length": 512
+  },
+  "blocks.0.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 629760,
+    "length": 512
+  },
+  "blocks.0.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 631808,
+    "length": 512
+  },
+  "blocks.0.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 633856,
+    "length": 512
+  },
+  "blocks.0.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 635904,
+    "length": 1536
+  },
+  "blocks.0.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 642048,
+    "length": 512
+  },
+  "blocks.0.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 644096,
+    "length": 512
+  },
+  "blocks.0.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 646144,
+    "length": 512
+  },
+  "blocks.0.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 648192,
+    "length": 512
+  },
+  "blocks.0.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 650240,
+    "length": 65536
+  },
+  "blocks.0.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 912384,
+    "length": 128
+  },
+  "blocks.1.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 912896,
+    "length": 65536
+  },
+  "blocks.1.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 1175040,
+    "length": 512
+  },
+  "blocks.1.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 1177088,
+    "length": 512
+  },
+  "blocks.1.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1179136,
+    "length": 512
+  },
+  "blocks.1.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1181184,
+    "length": 512
+  },
+  "blocks.1.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 1183232,
+    "length": 1536
+  },
+  "blocks.1.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 1189376,
+    "length": 512
+  },
+  "blocks.1.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 1191424,
+    "length": 512
+  },
+  "blocks.1.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1193472,
+    "length": 512
+  },
+  "blocks.1.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1195520,
+    "length": 512
+  },
+  "blocks.1.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 1197568,
+    "length": 65536
+  },
+  "blocks.1.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 1459712,
+    "length": 128
+  },
+  "blocks.2.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 1460224,
+    "length": 65536
+  },
+  "blocks.2.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 1722368,
+    "length": 512
+  },
+  "blocks.2.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 1724416,
+    "length": 512
+  },
+  "blocks.2.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1726464,
+    "length": 512
+  },
+  "blocks.2.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1728512,
+    "length": 512
+  },
+  "blocks.2.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 1730560,
+    "length": 1536
+  },
+  "blocks.2.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 1736704,
+    "length": 512
+  },
+  "blocks.2.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 1738752,
+    "length": 512
+  },
+  "blocks.2.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1740800,
+    "length": 512
+  },
+  "blocks.2.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 1742848,
+    "length": 512
+  },
+  "blocks.2.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 1744896,
+    "length": 65536
+  },
+  "blocks.2.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 2007040,
+    "length": 128
+  },
+  "blocks.3.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 2007552,
+    "length": 65536
+  },
+  "blocks.3.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 2269696,
+    "length": 512
+  },
+  "blocks.3.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 2271744,
+    "length": 512
+  },
+  "blocks.3.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2273792,
+    "length": 512
+  },
+  "blocks.3.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2275840,
+    "length": 512
+  },
+  "blocks.3.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 2277888,
+    "length": 1536
+  },
+  "blocks.3.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 2284032,
+    "length": 512
+  },
+  "blocks.3.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 2286080,
+    "length": 512
+  },
+  "blocks.3.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2288128,
+    "length": 512
+  },
+  "blocks.3.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2290176,
+    "length": 512
+  },
+  "blocks.3.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 2292224,
+    "length": 65536
+  },
+  "blocks.3.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 2554368,
+    "length": 128
+  },
+  "blocks.4.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 2554880,
+    "length": 65536
+  },
+  "blocks.4.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 2817024,
+    "length": 512
+  },
+  "blocks.4.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 2819072,
+    "length": 512
+  },
+  "blocks.4.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2821120,
+    "length": 512
+  },
+  "blocks.4.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2823168,
+    "length": 512
+  },
+  "blocks.4.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 2825216,
+    "length": 1536
+  },
+  "blocks.4.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 2831360,
+    "length": 512
+  },
+  "blocks.4.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 2833408,
+    "length": 512
+  },
+  "blocks.4.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2835456,
+    "length": 512
+  },
+  "blocks.4.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 2837504,
+    "length": 512
+  },
+  "blocks.4.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 2839552,
+    "length": 65536
+  },
+  "blocks.4.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 3101696,
+    "length": 128
+  },
+  "blocks.5.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 3102208,
+    "length": 65536
+  },
+  "blocks.5.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 3364352,
+    "length": 512
+  },
+  "blocks.5.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 3366400,
+    "length": 512
+  },
+  "blocks.5.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3368448,
+    "length": 512
+  },
+  "blocks.5.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3370496,
+    "length": 512
+  },
+  "blocks.5.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 3372544,
+    "length": 1536
+  },
+  "blocks.5.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 3378688,
+    "length": 512
+  },
+  "blocks.5.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 3380736,
+    "length": 512
+  },
+  "blocks.5.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3382784,
+    "length": 512
+  },
+  "blocks.5.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3384832,
+    "length": 512
+  },
+  "blocks.5.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 3386880,
+    "length": 65536
+  },
+  "blocks.5.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 3649024,
+    "length": 128
+  },
+  "blocks.6.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 3649536,
+    "length": 65536
+  },
+  "blocks.6.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 3911680,
+    "length": 512
+  },
+  "blocks.6.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 3913728,
+    "length": 512
+  },
+  "blocks.6.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3915776,
+    "length": 512
+  },
+  "blocks.6.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3917824,
+    "length": 512
+  },
+  "blocks.6.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 3919872,
+    "length": 1536
+  },
+  "blocks.6.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 3926016,
+    "length": 512
+  },
+  "blocks.6.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 3928064,
+    "length": 512
+  },
+  "blocks.6.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3930112,
+    "length": 512
+  },
+  "blocks.6.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 3932160,
+    "length": 512
+  },
+  "blocks.6.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 3934208,
+    "length": 65536
+  },
+  "blocks.6.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 4196352,
+    "length": 128
+  },
+  "blocks.7.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 4196864,
+    "length": 65536
+  },
+  "blocks.7.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 4459008,
+    "length": 512
+  },
+  "blocks.7.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 4461056,
+    "length": 512
+  },
+  "blocks.7.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 4463104,
+    "length": 512
+  },
+  "blocks.7.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 4465152,
+    "length": 512
+  },
+  "blocks.7.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 4467200,
+    "length": 1536
+  },
+  "blocks.7.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 4473344,
+    "length": 512
+  },
+  "blocks.7.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 4475392,
+    "length": 512
+  },
+  "blocks.7.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 4477440,
+    "length": 512
+  },
+  "blocks.7.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 4479488,
+    "length": 512
+  },
+  "blocks.7.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 4481536,
+    "length": 65536
+  },
+  "blocks.7.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 4743680,
+    "length": 128
+  },
+  "blocks.8.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 4744192,
+    "length": 65536
+  },
+  "blocks.8.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 5006336,
+    "length": 512
+  },
+  "blocks.8.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 5008384,
+    "length": 512
+  },
+  "blocks.8.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5010432,
+    "length": 512
+  },
+  "blocks.8.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5012480,
+    "length": 512
+  },
+  "blocks.8.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 5014528,
+    "length": 1536
+  },
+  "blocks.8.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 5020672,
+    "length": 512
+  },
+  "blocks.8.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 5022720,
+    "length": 512
+  },
+  "blocks.8.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5024768,
+    "length": 512
+  },
+  "blocks.8.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5026816,
+    "length": 512
+  },
+  "blocks.8.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 5028864,
+    "length": 65536
+  },
+  "blocks.8.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 5291008,
+    "length": 128
+  },
+  "blocks.9.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 5291520,
+    "length": 65536
+  },
+  "blocks.9.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 5553664,
+    "length": 512
+  },
+  "blocks.9.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 5555712,
+    "length": 512
+  },
+  "blocks.9.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5557760,
+    "length": 512
+  },
+  "blocks.9.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5559808,
+    "length": 512
+  },
+  "blocks.9.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 5561856,
+    "length": 1536
+  },
+  "blocks.9.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 5568000,
+    "length": 512
+  },
+  "blocks.9.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 5570048,
+    "length": 512
+  },
+  "blocks.9.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5572096,
+    "length": 512
+  },
+  "blocks.9.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 5574144,
+    "length": 512
+  },
+  "blocks.9.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 5576192,
+    "length": 65536
+  },
+  "blocks.9.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 5838336,
+    "length": 128
+  },
+  "blocks.10.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 5838848,
+    "length": 65536
+  },
+  "blocks.10.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 6100992,
+    "length": 512
+  },
+  "blocks.10.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 6103040,
+    "length": 512
+  },
+  "blocks.10.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6105088,
+    "length": 512
+  },
+  "blocks.10.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6107136,
+    "length": 512
+  },
+  "blocks.10.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 6109184,
+    "length": 1536
+  },
+  "blocks.10.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 6115328,
+    "length": 512
+  },
+  "blocks.10.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 6117376,
+    "length": 512
+  },
+  "blocks.10.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6119424,
+    "length": 512
+  },
+  "blocks.10.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6121472,
+    "length": 512
+  },
+  "blocks.10.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 6123520,
+    "length": 65536
+  },
+  "blocks.10.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 6385664,
+    "length": 128
+  },
+  "blocks.11.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 6386176,
+    "length": 65536
+  },
+  "blocks.11.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 6648320,
+    "length": 512
+  },
+  "blocks.11.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 6650368,
+    "length": 512
+  },
+  "blocks.11.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6652416,
+    "length": 512
+  },
+  "blocks.11.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6654464,
+    "length": 512
+  },
+  "blocks.11.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 6656512,
+    "length": 1536
+  },
+  "blocks.11.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 6662656,
+    "length": 512
+  },
+  "blocks.11.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 6664704,
+    "length": 512
+  },
+  "blocks.11.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6666752,
+    "length": 512
+  },
+  "blocks.11.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 6668800,
+    "length": 512
+  },
+  "blocks.11.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 6670848,
+    "length": 65536
+  },
+  "blocks.11.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 6932992,
+    "length": 128
+  },
+  "blocks.12.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 6933504,
+    "length": 65536
+  },
+  "blocks.12.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 7195648,
+    "length": 512
+  },
+  "blocks.12.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 7197696,
+    "length": 512
+  },
+  "blocks.12.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7199744,
+    "length": 512
+  },
+  "blocks.12.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7201792,
+    "length": 512
+  },
+  "blocks.12.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 7203840,
+    "length": 1536
+  },
+  "blocks.12.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 7209984,
+    "length": 512
+  },
+  "blocks.12.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 7212032,
+    "length": 512
+  },
+  "blocks.12.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7214080,
+    "length": 512
+  },
+  "blocks.12.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7216128,
+    "length": 512
+  },
+  "blocks.12.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 7218176,
+    "length": 65536
+  },
+  "blocks.12.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 7480320,
+    "length": 128
+  },
+  "blocks.13.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 7480832,
+    "length": 65536
+  },
+  "blocks.13.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 7742976,
+    "length": 512
+  },
+  "blocks.13.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 7745024,
+    "length": 512
+  },
+  "blocks.13.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7747072,
+    "length": 512
+  },
+  "blocks.13.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7749120,
+    "length": 512
+  },
+  "blocks.13.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 7751168,
+    "length": 1536
+  },
+  "blocks.13.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 7757312,
+    "length": 512
+  },
+  "blocks.13.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 7759360,
+    "length": 512
+  },
+  "blocks.13.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7761408,
+    "length": 512
+  },
+  "blocks.13.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 7763456,
+    "length": 512
+  },
+  "blocks.13.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 7765504,
+    "length": 65536
+  },
+  "blocks.13.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 8027648,
+    "length": 128
+  },
+  "blocks.14.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 8028160,
+    "length": 65536
+  },
+  "blocks.14.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 8290304,
+    "length": 512
+  },
+  "blocks.14.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 8292352,
+    "length": 512
+  },
+  "blocks.14.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8294400,
+    "length": 512
+  },
+  "blocks.14.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8296448,
+    "length": 512
+  },
+  "blocks.14.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 8298496,
+    "length": 1536
+  },
+  "blocks.14.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 8304640,
+    "length": 512
+  },
+  "blocks.14.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 8306688,
+    "length": 512
+  },
+  "blocks.14.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8308736,
+    "length": 512
+  },
+  "blocks.14.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8310784,
+    "length": 512
+  },
+  "blocks.14.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 8312832,
+    "length": 65536
+  },
+  "blocks.14.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 8574976,
+    "length": 128
+  },
+  "blocks.15.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 8575488,
+    "length": 65536
+  },
+  "blocks.15.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 8837632,
+    "length": 512
+  },
+  "blocks.15.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 8839680,
+    "length": 512
+  },
+  "blocks.15.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8841728,
+    "length": 512
+  },
+  "blocks.15.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8843776,
+    "length": 512
+  },
+  "blocks.15.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 8845824,
+    "length": 1536
+  },
+  "blocks.15.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 8851968,
+    "length": 512
+  },
+  "blocks.15.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 8854016,
+    "length": 512
+  },
+  "blocks.15.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8856064,
+    "length": 512
+  },
+  "blocks.15.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 8858112,
+    "length": 512
+  },
+  "blocks.15.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 8860160,
+    "length": 65536
+  },
+  "blocks.15.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 9122304,
+    "length": 128
+  },
+  "blocks.16.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 9122816,
+    "length": 65536
+  },
+  "blocks.16.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 9384960,
+    "length": 512
+  },
+  "blocks.16.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 9387008,
+    "length": 512
+  },
+  "blocks.16.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9389056,
+    "length": 512
+  },
+  "blocks.16.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9391104,
+    "length": 512
+  },
+  "blocks.16.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 9393152,
+    "length": 1536
+  },
+  "blocks.16.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 9399296,
+    "length": 512
+  },
+  "blocks.16.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 9401344,
+    "length": 512
+  },
+  "blocks.16.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9403392,
+    "length": 512
+  },
+  "blocks.16.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9405440,
+    "length": 512
+  },
+  "blocks.16.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 9407488,
+    "length": 65536
+  },
+  "blocks.16.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 9669632,
+    "length": 128
+  },
+  "blocks.17.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 9670144,
+    "length": 65536
+  },
+  "blocks.17.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 9932288,
+    "length": 512
+  },
+  "blocks.17.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 9934336,
+    "length": 512
+  },
+  "blocks.17.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9936384,
+    "length": 512
+  },
+  "blocks.17.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9938432,
+    "length": 512
+  },
+  "blocks.17.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 9940480,
+    "length": 1536
+  },
+  "blocks.17.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 9946624,
+    "length": 512
+  },
+  "blocks.17.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 9948672,
+    "length": 512
+  },
+  "blocks.17.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9950720,
+    "length": 512
+  },
+  "blocks.17.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 9952768,
+    "length": 512
+  },
+  "blocks.17.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 9954816,
+    "length": 65536
+  },
+  "blocks.17.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 10216960,
+    "length": 128
+  },
+  "blocks.18.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 10217472,
+    "length": 65536
+  },
+  "blocks.18.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 10479616,
+    "length": 512
+  },
+  "blocks.18.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 10481664,
+    "length": 512
+  },
+  "blocks.18.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 10483712,
+    "length": 512
+  },
+  "blocks.18.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 10485760,
+    "length": 512
+  },
+  "blocks.18.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 10487808,
+    "length": 1536
+  },
+  "blocks.18.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 10493952,
+    "length": 512
+  },
+  "blocks.18.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 10496000,
+    "length": 512
+  },
+  "blocks.18.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 10498048,
+    "length": 512
+  },
+  "blocks.18.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 10500096,
+    "length": 512
+  },
+  "blocks.18.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 10502144,
+    "length": 65536
+  },
+  "blocks.18.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 10764288,
+    "length": 128
+  },
+  "blocks.19.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 10764800,
+    "length": 65536
+  },
+  "blocks.19.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 11026944,
+    "length": 512
+  },
+  "blocks.19.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 11028992,
+    "length": 512
+  },
+  "blocks.19.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11031040,
+    "length": 512
+  },
+  "blocks.19.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11033088,
+    "length": 512
+  },
+  "blocks.19.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 11035136,
+    "length": 1536
+  },
+  "blocks.19.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 11041280,
+    "length": 512
+  },
+  "blocks.19.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 11043328,
+    "length": 512
+  },
+  "blocks.19.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11045376,
+    "length": 512
+  },
+  "blocks.19.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11047424,
+    "length": 512
+  },
+  "blocks.19.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 11049472,
+    "length": 65536
+  },
+  "blocks.19.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 11311616,
+    "length": 128
+  },
+  "blocks.20.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 11312128,
+    "length": 65536
+  },
+  "blocks.20.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 11574272,
+    "length": 512
+  },
+  "blocks.20.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 11576320,
+    "length": 512
+  },
+  "blocks.20.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11578368,
+    "length": 512
+  },
+  "blocks.20.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11580416,
+    "length": 512
+  },
+  "blocks.20.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 11582464,
+    "length": 1536
+  },
+  "blocks.20.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 11588608,
+    "length": 512
+  },
+  "blocks.20.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 11590656,
+    "length": 512
+  },
+  "blocks.20.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11592704,
+    "length": 512
+  },
+  "blocks.20.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 11594752,
+    "length": 512
+  },
+  "blocks.20.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 11596800,
+    "length": 65536
+  },
+  "blocks.20.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 11858944,
+    "length": 128
+  },
+  "blocks.21.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 11859456,
+    "length": 65536
+  },
+  "blocks.21.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 12121600,
+    "length": 512
+  },
+  "blocks.21.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 12123648,
+    "length": 512
+  },
+  "blocks.21.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12125696,
+    "length": 512
+  },
+  "blocks.21.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12127744,
+    "length": 512
+  },
+  "blocks.21.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 12129792,
+    "length": 1536
+  },
+  "blocks.21.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 12135936,
+    "length": 512
+  },
+  "blocks.21.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 12137984,
+    "length": 512
+  },
+  "blocks.21.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12140032,
+    "length": 512
+  },
+  "blocks.21.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12142080,
+    "length": 512
+  },
+  "blocks.21.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 12144128,
+    "length": 65536
+  },
+  "blocks.21.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 12406272,
+    "length": 128
+  },
+  "blocks.22.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 12406784,
+    "length": 65536
+  },
+  "blocks.22.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 12668928,
+    "length": 512
+  },
+  "blocks.22.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 12670976,
+    "length": 512
+  },
+  "blocks.22.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12673024,
+    "length": 512
+  },
+  "blocks.22.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12675072,
+    "length": 512
+  },
+  "blocks.22.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 12677120,
+    "length": 1536
+  },
+  "blocks.22.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 12683264,
+    "length": 512
+  },
+  "blocks.22.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 12685312,
+    "length": 512
+  },
+  "blocks.22.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12687360,
+    "length": 512
+  },
+  "blocks.22.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 12689408,
+    "length": 512
+  },
+  "blocks.22.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 12691456,
+    "length": 65536
+  },
+  "blocks.22.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 12953600,
+    "length": 128
+  },
+  "blocks.23.pointwise_in.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 12954112,
+    "length": 65536
+  },
+  "blocks.23.pointwise_in.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 13216256,
+    "length": 512
+  },
+  "blocks.23.prelu1.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 13218304,
+    "length": 512
+  },
+  "blocks.23.norm1.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 13220352,
+    "length": 512
+  },
+  "blocks.23.norm1.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 13222400,
+    "length": 512
+  },
+  "blocks.23.depthwise.weight": {
+    "shape": [
+      512,
+      1,
+      3
+    ],
+    "offset": 13224448,
+    "length": 1536
+  },
+  "blocks.23.depthwise.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 13230592,
+    "length": 512
+  },
+  "blocks.23.prelu2.weight": {
+    "shape": [
+      512
+    ],
+    "offset": 13232640,
+    "length": 512
+  },
+  "blocks.23.norm2.gamma": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 13234688,
+    "length": 512
+  },
+  "blocks.23.norm2.beta": {
+    "shape": [
+      1,
+      512,
+      1
+    ],
+    "offset": 13236736,
+    "length": 512
+  },
+  "blocks.23.pointwise_out.weight": {
+    "shape": [
+      128,
+      512,
+      1
+    ],
+    "offset": 13238784,
+    "length": 65536
+  },
+  "blocks.23.pointwise_out.bias": {
+    "shape": [
+      128
+    ],
+    "offset": 13500928,
+    "length": 128
+  },
+  "out_prelu.weight": {
+    "shape": [
+      128
+    ],
+    "offset": 13501440,
+    "length": 128
+  },
+  "out_proj.weight": {
+    "shape": [
+      512,
+      128,
+      1
+    ],
+    "offset": 13501952,
+    "length": 65536
+  },
+  "out_proj.bias": {
+    "shape": [
+      512
+    ],
+    "offset": 13764096,
+    "length": 512
+  }
+}

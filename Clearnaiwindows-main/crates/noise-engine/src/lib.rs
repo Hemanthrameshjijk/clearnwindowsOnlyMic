@@ -169,6 +169,33 @@ pub struct DeepFilterEngine {
 // Linux project.
 unsafe impl Send for DeepFilterEngine {}
 
+/// The real, official DeepFilterNet3 ONNX export, fetched directly from
+/// the upstream project's own repository
+/// (`https://raw.githubusercontent.com/Rikorose/DeepFilterNet/main/models/DeepFilterNet3_onnx.tar.gz`,
+/// the standard/published release, not the `_ll` low-latency variant) -
+/// confirmed via its own bundled `config.ini`: `sr = 48000`, `hop_size =
+/// 480`, an exact match for this workspace's frame contract with no
+/// buffering/adaptation needed. Covered by the same repo-wide dual
+/// MIT/Apache-2.0 license as the `deep_filter` crate itself (see this
+/// module's docs above) - no separate model license carve-out exists in
+/// the upstream README.
+const BUNDLED_MODEL_TAR_GZ: &[u8] = include_bytes!("../assets/DeepFilterNet3_onnx.tar.gz");
+
+/// Extracts the bundled model archive to a temp file (once per call - cheap
+/// for ~8MB, and avoids needing an app-data-dir path threaded into this
+/// crate) and constructs a real `DeepFilterEngine` from it. This is the
+/// entry point for anything that just wants "the real, bundled DeepFilterNet
+/// backend" without caring about the tar.gz/temp-file mechanics -
+/// `NoiseEngineKind::DeepFilter`'s `deep_filter_model_path` parameter
+/// remains for a caller that wants to point at a *different* model file
+/// instead.
+pub fn load_bundled_deep_filter() -> Result<DeepFilterEngine> {
+    let path = std::env::temp_dir().join("clearnai-deepfilternet3-onnx.tar.gz");
+    std::fs::write(&path, BUNDLED_MODEL_TAR_GZ)
+        .with_context(|| format!("extracting bundled DeepFilterNet model to {}", path.display()))?;
+    DeepFilterEngine::new(&path)
+}
+
 impl DeepFilterEngine {
     pub fn new(model_path: &Path) -> Result<Self> {
         let params = deep_filter::tract::DfParams::new(model_path.to_path_buf())
@@ -250,6 +277,50 @@ pub fn build(
 mod tests {
     use super::*;
     use rand::Rng;
+
+    /// The real, previously-unexercised path (see `DeepFilterEngine`'s crate
+    /// docs: "not exercised in this session's tests" before now): actually
+    /// load the bundled real DeepFilterNet3 model and run real frames of
+    /// audio through it, proving the tar.gz layout/`config.ini` values/
+    /// `tract` API usage all actually work together, not just compile.
+    ///
+    /// What this test CAN honestly verify without real speech audio (none
+    /// exists in this sandboxed environment, same limitation already
+    /// documented for `speaker-encoder`'s ECAPA/WeSpeaker verification):
+    /// the model loads, runs for many consecutive frames without erroring
+    /// or panicking, and produces finite output throughout. What it does
+    /// NOT verify: actual perceptual noise-suppression quality - a
+    /// synthetic sine-tone-plus-noise test signal doesn't resemble real
+    /// speech, so the model aggressively suppressing it toward silence
+    /// (observed while writing this test) is plausible correct behavior,
+    /// not a bug - real quality needs a real recording and a human
+    /// listener, done separately by the app's actual user.
+    #[test]
+    fn bundled_deep_filter_loads_and_processes_real_audio_safely() {
+        let mut engine = load_bundled_deep_filter().expect("bundled DeepFilterNet model must load and construct");
+
+        let mut rng = rand::thread_rng();
+        for frame_idx in 0..50 {
+            // A different synthetic signal each frame (varying frequency/
+            // amplitude/noise), so this exercises the model's real streaming
+            // state transitions rather than converging to one fixed input.
+            let mut frame: Vec<f32> = (0..FRAME_SAMPLES)
+                .map(|i| {
+                    let f = 150.0 + (frame_idx as f32 * 37.0) % 300.0;
+                    (i as f32 * f * 0.001).sin() * 0.4 + (rng.gen::<f32>() - 0.5) * 0.1
+                })
+                .collect();
+            engine.process(&mut frame);
+            assert!(
+                frame.iter().all(|s| s.is_finite()),
+                "output must be finite on frame {frame_idx}, got a non-finite sample"
+            );
+            assert!(
+                frame.iter().all(|&s| (-1.0..=1.0).contains(&s)),
+                "output must stay within [-1.0, 1.0] on frame {frame_idx}"
+            );
+        }
+    }
 
     #[test]
     fn disabled_engine_leaves_frame_bit_for_bit_unchanged() {

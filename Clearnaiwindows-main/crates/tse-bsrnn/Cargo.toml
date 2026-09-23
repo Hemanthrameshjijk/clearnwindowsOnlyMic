@@ -1,0 +1,85 @@
+[package]
+name = "tse-bsrnn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Same exact version as `speaker-encoder` (see that crate's Cargo.toml for
+# the real, verified `half`/`iced`/`wgpu` resolution history behind this
+# pin) - reused here only for the ECAPA_TDNN_GLOB_c512 speaker encoder.
+# The BSRNN separator itself does NOT use tract-onnx - see src/lib.rs.
+tract-onnx = "0.23.7"
+
+# Defines the `TseBackend` trait this crate's `RealBsrnnTseBackend`
+# implements, and the `TargetSpeakerProfile`/`SpeakerEncoder`/
+# `TargetSpeakerStore` types the enrollment-side `TseSpeakerEncoder` reuses
+# (see tse_speaker_encoder.rs's docs on why reusing this dimension-
+# agnostic type - rather than inventing a new one - was the lower-risk
+# choice once its shape was actually re-read).
+tse-engine = { path = "../tse-engine" }
+speaker-profile = { path = "../speaker-profile" }
+
+# Same exact recipe as `speaker-encoder`'s fbank.rs (this crate's own
+# fbank config differs in specific values - dither=1.0, hamming window,
+# CMVN mean-subtraction - matching the real Fbank_kaldi wrapper baked into
+# this checkpoint, not WeSpeaker ResNet34's - see tse_speaker_encoder.rs).
+kaldi-native-fbank = "0.1"
+
+# Same version as speaker-encoder's non-causal, whole-buffer enrollment-
+# time resample (this crate's own copy, not a cross-crate dependency, to
+# keep tse-bsrnn's own resampling story self-contained - mirrors the
+# project's existing precedent of the causal Rust resampler *also* being
+# its own new component rather than a reuse of speaker-encoder's non-causal
+# one).
+rubato = "0.14"
+
+# Parses the separator's weight manifest (name -> shape/offset/length into
+# a single raw f32 blob) at startup only - never on the realtime audio
+# thread. A mature, ubiquitous crate; simpler and more readable here than
+# hand-rolling a binary manifest format for 598 tensors.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Pure-Rust FFT, used for the hand-rolled StreamingStft/StreamingIstft -
+# see stft.rs's docs for why this (not tract-onnx) backs the STFT/iSTFT,
+# ported from the already-debugged Python reference in
+# poc/real_tse/src/streaming_engine.py.
+rustfft = "6"
+
+# Real performance fix: the first correctness-verified pass of the
+# separator (separator.rs) used plain scalar per-band/per-timestep loops
+# for every matmul (see matmul.rs's docs) - measured at RTF~31 (370s for
+# 12s of audio) against a real 12s two-speaker mixture, i.e. slower than
+# even the unoptimized Python POC (RTF~3.8). `ndarray`'s default (pure-
+# Rust, no external BLAS/system dependency) matmul is `matrixmultiply`-
+# backed and lets band_rnn's 32 independent per-band LSTM cell
+# computations - and band_masker's per-band conv1/conv2 - be issued as one
+# batched matmul instead of 32 separate small ones, which is where nearly
+# all the compute time is spent (see matmul.rs's real op-count estimate).
+#
+# TRIED AND REVERTED: `matrixmultiply-threading` (`matrixmultiply`'s own
+# persistent 4-thread pool for its gemm kernel, used by `batched_linear` -
+# band_rnn's matmuls, band_comm's proj step). Measured only a marginal
+# (~5%) speed gain live. Real finding: this pool is process-global and NOT
+# reachable by `separator::set_max_parallelism_hint`'s thread-local cap
+# (that only bounds this crate's OWN `std::thread::scope` workers in
+# band_comm/band_masker) - so the GUI's offline "Test with TSE" run kept
+# opening up to 4 more uncapped threads through this path even after
+# capping everything else, still degrading live mic audio via CPU
+# contention. Not worth keeping a barely-measurable speedup that can't be
+# bounded when something CPU-heavy but non-realtime needs to coexist with
+# the live pipeline - removed.
+ndarray = "0.15"
+
+# TRIED AND REVERTED: routing `run_band_comm`/`run_band_masker`'s
+# `std::thread::scope`-based parallelism through `rayon::scope` instead,
+# on the theory that raw OS-thread creation on every call was the
+# remaining overhead at large `t_frames`. Measured: no improvement at all
+# at the batched sizes that matter (RTF 3.21x/3.37x either way), and a
+# real regression at `t_frames=1` (today's live call pattern: RTF 5.28x ->
+# 5.83x) - rayon's own per-task scheduling overhead doesn't pay off for
+# just 2 work items. The real cost at large `t_frames` is the LSTM
+# computation itself, not thread-spawn overhead. Kept as a note so this
+# isn't re-tried blind - see `tests/profile_breakdown.rs` for the numbers.
+
+[dev-dependencies]

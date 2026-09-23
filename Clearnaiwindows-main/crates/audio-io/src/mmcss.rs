@@ -23,7 +23,10 @@
 #![cfg(windows)]
 
 use windows::core::PCWSTR;
-use windows::Win32::System::Threading::{AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW};
+use windows::Win32::System::Threading::{
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadPriority,
+    THREAD_PRIORITY_BELOW_NORMAL,
+};
 
 /// RAII guard for one thread's MMCSS elevation. Reverts automatically when
 /// dropped (i.e. hold this for as long as the thread should stay elevated -
@@ -75,5 +78,27 @@ pub fn elevate_current_thread() -> Option<MmcssGuard> {
     match handle {
         Ok(h) if !h.is_invalid() => Some(MmcssGuard(h)),
         _ => None,
+    }
+}
+
+/// Opposite of `elevate_current_thread`: drops the calling thread's OS
+/// scheduling priority below normal, so it never competes with the
+/// realtime-elevated audio threads under CPU contention. Real hardware
+/// finding: a CPU-heavy background task (the GUI's offline "Test with TSE"
+/// button, which runs the full TSE model across every core for up to a
+/// minute with no coordination with the live pipeline) measurably degraded
+/// live mic audio - added latency, frame drops - purely from competing for
+/// CPU time with the already-elevated realtime threads. No RAII guard here
+/// (unlike `elevate_current_thread`): callers of this function are one-shot
+/// background worker threads that exit when their work is done, so there is
+/// nothing to "revert" - the thread (and its lowered priority) simply goes
+/// away. Best-effort like its counterpart: failure is silently ignored, the
+/// thread just runs at normal priority instead, never fatal.
+pub fn lower_current_thread_priority() {
+    // SAFETY: `GetCurrentThread` returns a pseudo-handle valid for the
+    // calling thread's entire lifetime, requiring no cleanup; `SetThreadPriority`
+    // with it is a documented, safe-to-call-anytime Win32 operation.
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }

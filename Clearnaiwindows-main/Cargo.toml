@@ -8,6 +8,12 @@ members = [
     "crates/audio-io",
     "crates/aec",
     "crates/driver-transport",
+    "crates/speaker-profile",
+    "crates/speaker-encoder",
+    "crates/enrollment",
+    "crates/tse-engine",
+    "crates/tse-bsrnn",
+    "crates/bvc-vanta",
     "app",
 ]
 

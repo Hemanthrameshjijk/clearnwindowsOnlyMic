@@ -1,0 +1,21 @@
+[package]
+name = "enrollment"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# For the realtime-safe ring buffer (`make_ring_buffer`/`Producer`/
+# `Consumer`) the mic pipeline thread pushes reference audio into, and
+# `StageToggle` for the lock-free "is enrollment currently recording" flag
+# checked on that thread every frame - the exact same primitives every other
+# realtime tap in this project already uses (see `dsp_core`'s own docs).
+dsp-core = { path = "../dsp-core" }
+speaker-profile = { path = "../speaker-profile" }
+
+# Real RNNoise denoising (`noise_engine::RnnoiseEngine`, pure Rust via
+# `nnnoiseless` - no C/libclang dependency, portable) applied to a captured
+# recording right before it's handed to the speaker encoder - see
+# `session.rs::denoise_for_embedding`'s docs. The RAW capture used for
+# playback/`last_recording` is untouched; only the copy used for embedding
+# extraction is denoised.
+noise-engine = { path = "../noise-engine" }

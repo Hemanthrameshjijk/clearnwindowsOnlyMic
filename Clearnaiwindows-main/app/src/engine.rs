@@ -1,6 +1,8 @@
 //! Real Windows audio engine: constructs every DSP stage up front and
 //! wires the mic pipeline over `dsp_core` ring buffers, starting the real
-//! WASAPI threads via `audio-io`.
+//! WASAPI threads via `audio-io`. Also constructs the speaker-reference-
+//! enrollment subsystem and the BVC backend router (Off/Hush/TSE) - see
+//! `docs/TSE_ENROLLMENT.md`.
 //!
 //! AEC and the hardware-output loopback tap that fed its reference signal
 //! have been removed from this build - the loopback tap was a persistent,
@@ -22,11 +24,15 @@
 //!
 //! # What has and hasn't been verified
 //!
-//! This module type-checks against the real public APIs of every crate it
-//! calls into (`cargo check --target x86_64-pc-windows-gnu`). It has never
-//! been run: no real WASAPI device, no real `weya_nc.dll`, no real VB-Cable
-//! install. Every claim about behavior below is a claim about what the code
-//! is *written* to do, not what has been *observed* to happen.
+//! This module compiles and its unit tests pass on a real Windows machine
+//! with a real `x86_64-pc-windows-gnu` toolchain (not just cross-compile
+//! type-checked from Linux, as earlier revisions of this module were). It
+//! has still never been *run* as the actual `clearnairt.exe` binary against
+//! real hardware in that environment: no real WASAPI device, no real
+//! `weya_nc.dll` session, no real VB-Cable install were exercised there.
+//! Every claim about behavior below is a claim about what the code is
+//! *written* to do, verified by compilation and unit tests, not something
+//! observed running end-to-end against real audio hardware.
 
 #![cfg(windows)]
 
@@ -36,12 +42,36 @@ use anyhow::{Context, Result};
 use audio_io::capture::MicCapture;
 use audio_io::devices;
 use audio_io::render::HardwareRender;
-use dsp_core::{make_ring_buffer, run_if_enabled, Consumer, Producer, Stage, FRAME_SAMPLES};
+use dsp_core::{make_ring_buffer, run_if_enabled, Consumer, LatencyLog, Producer, Stage, FRAME_SAMPLES};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+
+/// TSE's own watchdog timeout. Deliberately far tighter than Hush's 500ms
+/// (`BVC_WATCHDOG_TIMEOUT` below) - see the task this subsystem was built
+/// for: "a 500ms timeout is far too large to represent acceptable 10ms audio
+/// processing latency." 20ms is still generous relative to the 10ms frame
+/// deadline (allows for one frame's worth of scheduling jitter on top of the
+/// deadline itself), but is small enough that a genuinely wedged TSE backend
+/// is caught and bypassed within roughly 2 frame periods, not 50.
+const TSE_WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// TEMPORARY, wider timeout for `tse_bsrnn::backend::RealBsrnnTseBackend`
+/// specifically, while it is still far from real-time (measured at
+/// RTF~21-31x - a single 10ms frame can take 200-300ms). With the real
+/// `TSE_WATCHDOG_TIMEOUT` (20ms) this backend would time out on its very
+/// first few calls and hit `dsp_core::watchdog`'s `MAX_CONSECUTIVE_TIMEOUTS`
+/// (3), permanently bypassing itself within ~60ms of being selected - which
+/// would make it impossible to actually hear/exercise the real model at all,
+/// not just slow. This wider timeout is a deliberate, temporary trade: it
+/// lets the real model run to completion (with real, audible extra latency)
+/// so it can be tested end-to-end, at the cost of not enforcing the true
+/// realtime deadline yet. Must be tightened back down to (or replaced by)
+/// `TSE_WATCHDOG_TIMEOUT` once the backend is actually optimized to meet it -
+/// this is not a production-ready value.
+const TSE_REAL_BACKEND_TEMPORARY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Frame deadline in nanoseconds (10ms @ 48kHz), used to classify realtime
 /// status against measured processing-time percentiles.
@@ -355,7 +385,7 @@ pub fn start(
     // just not infinite) instead of freezing the whole pipeline thread
     // silently and permanently.
     const BVC_WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-    let mic_bvc_stage: Box<dyn Stage> = match mic_bvc_load {
+    let mic_hush_stage: Box<dyn Stage> = match mic_bvc_load {
         Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
             "mic BVC",
             Box::new(stage),
@@ -365,6 +395,160 @@ pub fn start(
         )),
         Err(_) => Box::new(NoOpStage("BVC (unavailable)")),
     };
+
+    // --- DeepFilterNet: real, official model (see
+    // `noise_engine::load_bundled_deep_filter`'s docs for its verified
+    // provenance), same generic noise/other-voice suppression category as
+    // Hush, a different architecture/model. Loads a real ONNX graph via
+    // `tract` (pure Rust, no external DLL) - construction can genuinely
+    // fail (bad/missing bundled bytes, a `tract` runtime error), so this
+    // follows the exact same "construct once at startup, honest fallback,
+    // never crash the app over an optional backend" pattern as Hush/TSE
+    // above and below.
+    let (mic_deep_filter_available, mic_deep_filter_unavailable_reason, mic_deep_filter_stage): (bool, Option<String>, Box<dyn Stage>) =
+        match noise_engine::load_bundled_deep_filter() {
+            Ok(engine) => (
+                true,
+                None,
+                Box::new(dsp_core::WatchdogStage::new(
+                    "mic DeepFilterNet",
+                    Box::new(engine),
+                    BVC_WATCHDOG_TIMEOUT,
+                    |msg| crate::log_error!("[clearnairt] {msg}"),
+                    || Box::new(audio_io::mmcss::elevate_current_thread()),
+                )),
+            ),
+            Err(e) => (
+                false,
+                Some(format!("DeepFilterNet failed to load ({e:#}); this BVC option is unavailable.")),
+                Box::new(NoOpStage("BVC DeepFilterNet (unavailable)")),
+            ),
+        };
+
+    // --- Speaker-reference-enrollment subsystem + the BVC backend router
+    // (Off/Hush/DeepFilterNet/TSE/Vanta) - see docs/TSE_ENROLLMENT.md. `target_speaker_store`
+    // (256-dim, WeSpeaker ResNet34) drives the GUI's enrollment/verification
+    // display; `tse_speaker_store` (192-dim, ECAPA_TDNN_GLOB_c512) and
+    // `vanta_speaker_store` (192-dim, SpeechBrain ECAPA - a DIFFERENT
+    // embedding space despite the same dimension) are independent stores
+    // populated from the SAME recording (see
+    // `enrollment::EnrollmentSession::with_secondary_encoder`), read only by
+    // their respective real backends below - see `tse_bsrnn::tse_speaker_encoder`'s
+    // and `bvc_vanta::ecapa`'s module docs for why these are separate
+    // stores, not one shared/bridged embedding. `enrollment_tap` is the
+    // realtime-thread half, moved into `spawn_mic_pipeline` further down.
+    let (enrollment_tap, target_speaker_store, enrollment_session, enrollment_warning, tse_speaker_store, vanta_speaker_store) =
+        crate::shared::build_enrollment_subsystem();
+
+    // --- Vanta: real, trained (if honestly weak - epoch 6, val SI-SDR
+    // +5.911dB, real measured eval only +1.07dB average improvement with a
+    // -7.10dB worst case, PESQ 0.84) separator + encoder/decoder weights,
+    // all now bundled and loading - see `bvc_vanta`'s crate docs for the
+    // full status. Same "construct once at startup, honest fallback,
+    // never crash the app over an optional backend" pattern as every other
+    // BVC backend above. Still labeled experimental in the GUI - a real,
+    // running model is not the same as a production-quality one.
+    let (mic_vanta_available, mic_vanta_unavailable_reason, mic_vanta_stage): (bool, Option<String>, Box<dyn Stage>) =
+        match bvc_vanta::VantaBackend::try_load() {
+            Ok(real) => {
+                let adapter = tse_engine::TseStageAdapter::new(real, vanta_speaker_store.clone(), Arc::new(LatencyLog::new(256)));
+                let stage = Box::new(dsp_core::WatchdogStage::new(
+                    "mic Vanta",
+                    Box::new(adapter),
+                    TSE_REAL_BACKEND_TEMPORARY_TIMEOUT,
+                    |msg| crate::log_error!("[clearnairt] {msg}"),
+                    || Box::new(audio_io::mmcss::elevate_current_thread()),
+                ));
+                (
+                    true,
+                    Some(
+                        "EXPERIMENTAL: real but weak model (measured +1.07dB average improvement, \
+                         -7.10dB worst case on held-out eval) - may sometimes make audio worse, not better."
+                            .to_string(),
+                    ),
+                    stage,
+                )
+            }
+            Err(e) => {
+                let adapter = tse_engine::TseStageAdapter::new(
+                    tse_engine::UnavailableTse,
+                    vanta_speaker_store.clone(),
+                    Arc::new(LatencyLog::new(256)),
+                );
+                let stage = Box::new(dsp_core::WatchdogStage::new(
+                    "mic Vanta",
+                    Box::new(adapter),
+                    TSE_WATCHDOG_TIMEOUT,
+                    |msg| crate::log_error!("[clearnairt] {msg}"),
+                    || Box::new(audio_io::mmcss::elevate_current_thread()),
+                ));
+                (false, Some(format!("Vanta backend failed to load ({e}); this BVC option is unavailable.")), stage)
+            }
+        };
+    if let Some(w) = enrollment_warning {
+        warnings.push(w);
+    }
+    // Real backend attempt, mirroring exactly how `bvc_hush::HushBvcStage::try_load`
+    // gates Hush availability above: construct the real thing once, at
+    // startup, falling back to the honest `UnavailableTse` stub (with a
+    // specific reason surfaced to the GUI) if it doesn't load - never a
+    // silent, partially-working state.
+    //
+    // KNOWN, NOT-YET-FIXED GAPS in this real backend (see
+    // `tse_bsrnn::backend::RealBsrnnTseBackend`'s own docs for detail):
+    // measured at roughly RTF~21-31x (i.e. NOT real-time - a 10ms frame can
+    // take 200ms+ to process), and it allocates on the "realtime" frame
+    // path, a real violation of `TseBackend`'s own no-allocation contract.
+    // `TSE_WATCHDOG_TIMEOUT` below bounds the damage (a slow/failing call
+    // passes the frame through unmodified) but does not make this fast.
+    // Wired in now so the real model can be exercised/heard end-to-end;
+    // performance work remains before this meets the realtime deadline.
+    let (tse_backend_available, tse_unavailable_reason, tse_stage): (bool, Option<String>, Box<dyn Stage>) =
+        match tse_bsrnn::backend::RealBsrnnTseBackend::try_load() {
+            Ok(real) => {
+                let adapter = tse_engine::TseStageAdapter::new(real, tse_speaker_store.clone(), Arc::new(LatencyLog::new(256)));
+                // See TSE_REAL_BACKEND_TEMPORARY_TIMEOUT's docs: NOT the
+                // real 20ms deadline yet, deliberately, until this backend
+                // is optimized to actually meet it.
+                let stage = Box::new(dsp_core::WatchdogStage::new(
+                    "mic TSE",
+                    Box::new(adapter),
+                    TSE_REAL_BACKEND_TEMPORARY_TIMEOUT,
+                    |msg| crate::log_error!("[clearnairt] {msg}"),
+                    || Box::new(audio_io::mmcss::elevate_current_thread()),
+                ));
+                (true, None, stage)
+            }
+            Err(e) => {
+                let adapter = tse_engine::TseStageAdapter::new(
+                    tse_engine::UnavailableTse,
+                    tse_speaker_store.clone(),
+                    Arc::new(LatencyLog::new(256)),
+                );
+                let stage = Box::new(dsp_core::WatchdogStage::new(
+                    "mic TSE",
+                    Box::new(adapter),
+                    TSE_WATCHDOG_TIMEOUT,
+                    |msg| crate::log_error!("[clearnairt] {msg}"),
+                    || Box::new(audio_io::mmcss::elevate_current_thread()),
+                ));
+                (false, Some(format!("Real TSE backend failed to load ({e}); TSE passes audio through unmodified.")), stage)
+            }
+        };
+    let tse_available = tse_backend_available;
+    // Owned by `handles.bvc_backend` (set below) and cloned into the
+    // router - both sides must observe the same atomic for a live GUI
+    // backend switch to actually take effect, mirroring exactly how
+    // `mic_studio_preset` is shared between `EngineHandles` and the mic
+    // pipeline thread's live preset-swap logic further down this file.
+    let bvc_backend_selector = dsp_core::SharedPreset::new(settings.mic_bvc_backend);
+    let mic_bvc_stage: Box<dyn Stage> = Box::new(tse_engine::BvcRouterStage::new(
+        bvc_backend_selector.clone(),
+        mic_hush_stage,
+        mic_deep_filter_stage,
+        tse_stage,
+        mic_vanta_stage,
+    ));
     // --- Speaker-outbound (Pipeline 2) has been deliberately disabled for
     // this session, per a scoped decision to focus exclusively on the mic
     // path: capture -> AEC/Noise/BVC/Studio -> virtual mic. Nothing below
@@ -387,6 +571,15 @@ pub fn start(
         noise_engine::build(noise_engine::NoiseEngineKind::RnNoise, None)
             .context("constructing mic-path RNNoise stage")?;
 
+    // --- Voice Gate: cheap, real-time volume-based background-voice
+    // suppression - see `dsp_core::VoiceGateStage`'s docs. Must run FIRST
+    // in the pipeline (before `AutoGainStage`, which always runs
+    // unconditionally at the very top of `spawn_mic_pipeline`'s loop) - AGC
+    // boosts any quiet frame, including quiet background chatter, up
+    // toward its target level, which would erase the loudness contrast
+    // this stage needs. ---
+    let mic_voice_gate_stage: Box<dyn Stage> = Box::new(dsp_core::VoiceGateStage::new());
+
     // --- Studio: constructed from the persisted preset preference (default
     // `Natural`, the gentlest of the three active presets - see
     // `settings::default_studio_preset`). Both mic and speaker paths now get
@@ -405,7 +598,23 @@ pub fn start(
         speaker_bvc_available,
         speaker_bvc_unavailable_reason,
         Vec::new(),
+        tse_available,
+        tse_unavailable_reason,
+        mic_deep_filter_available,
+        mic_deep_filter_unavailable_reason,
+        mic_vanta_available,
+        mic_vanta_unavailable_reason,
+        target_speaker_store,
+        tse_speaker_store.clone(),
+        vanta_speaker_store.clone(),
+        enrollment_session,
     );
+    // See `bvc_backend_selector`'s docs above - overwrite the freshly
+    // constructed (otherwise-unread) `SharedPreset` `new_from_settings`
+    // builds internally with the one actually shared with the router, the
+    // same "construct inert, then wire the real thing" pattern already used
+    // for `device_switcher` below.
+    handles.bvc_backend = bvc_backend_selector;
 
     // --- Ring buffers. 2 seconds of headroom at 48kHz is generous relative
     // to the 10ms frame size; sized once here, never resized (a live device
@@ -524,10 +733,12 @@ pub fn start(
         mic_out_swap.clone(),
         monitor_out_swap.clone(),
         handles.clone(),
+        mic_voice_gate_stage,
         mic_noise_stage,
         mic_bvc_stage,
         mic_studio_stage,
         driver_writer,
+        enrollment_tap,
     )?;
 
     // --- Pipeline 2 (speaker outbound) is disabled for this session - see
@@ -675,10 +886,12 @@ fn spawn_mic_pipeline(
     mic_out: SwapProducer,
     monitor_out: SwapProducer,
     handles: EngineHandles,
+    mut voice_gate_stage: Box<dyn Stage>,
     mut noise_stage: Box<dyn Stage>,
     mut bvc_stage: Box<dyn Stage>,
     mut studio_stage: Box<dyn Stage>,
     driver_writer: Option<driver_transport::SharedRingWriter>,
+    mut enrollment_tap: enrollment::EnrollmentTap,
 ) -> Result<()> {
     thread::Builder::new()
         .name("clearnai-mic-pipeline".into())
@@ -718,7 +931,19 @@ fn spawn_mic_pipeline(
                     last_studio_preset = current_preset;
                 }
 
+                // Must run BEFORE auto_gain - see `dsp_core::VoiceGateStage`'s
+                // docs and `mic_voice_gate_stage`'s construction comment above.
+                run_if_enabled(voice_gate_stage.as_mut(), &handles.mic_voice_gate, &mut frame);
                 auto_gain.process(&mut frame);
+                // Reference-enrollment tap: reads the same auto-gained,
+                // pre-Noise/BVC/Studio signal a real "clean voice reference"
+                // should be built from - see `enrollment`'s crate docs on
+                // why this sits here rather than after BVC/Studio (which
+                // would color the target-speaker embedding with whatever
+                // those stages did on that particular take). A no-op
+                // (single relaxed atomic load) unless a recording is
+                // actually in progress.
+                enrollment_tap.push_frame_if_active(&frame);
                 run_if_enabled(noise_stage.as_mut(), &handles.mic_noise, &mut frame);
                 run_if_enabled(bvc_stage.as_mut(), &handles.mic_bvc, &mut frame);
                 run_if_enabled(studio_stage.as_mut(), &handles.mic_studio, &mut frame);
@@ -776,3 +1001,146 @@ fn spawn_mic_pipeline(
 // pipeline (`spawn_mic_pipeline` above) and the read-only hardware-output
 // loopback tap (`LoopbackTap`, used as AEC's reference on the mic path) are
 // untouched.
+
+use crate::shared::PlaybackHandle;
+
+/// Plays `samples` (raw, at `dsp_core::SAMPLE_RATE_HZ`) through
+/// `device_id` (or the system default if `None` - e.g. whatever the
+/// user's Bluetooth headset happens to be, if currently the Windows
+/// default; real, observed behavior, not hypothetical, which is exactly
+/// why `device_id` exists as an explicit override rather than always
+/// assuming default-is-fine) - backs the GUI's "Play Recording" button
+/// and its Pause/Resume/Stop controls, letting the user hear exactly what
+/// an enrollment attempt actually captured (useful for telling "too
+/// quiet"/"wrong device" apart from a genuinely good recording). Spawns
+/// its own background thread and returns a `PlaybackHandle` immediately;
+/// failures opening the device are logged (via the same handle's
+/// `Finished` status - the GUI just won't see progress advance), matching
+/// this project's existing "rare, user-initiated action" idiom
+/// (`spawn_device_switch`).
+///
+/// Feeds the ring buffer in small chunks (not the whole clip up front) so
+/// `pause` can take effect quickly (stop feeding, existing buffered audio
+/// finishes, then real silence - not a jump), and so `stop`/pause can be
+/// checked between chunks without needing to interrupt a blocking write.
+pub fn play_recorded_audio(samples: Vec<f32>, device_id: Option<String>) -> PlaybackHandle {
+    let total_samples = samples.len();
+    let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paused_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let played_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let handle = PlaybackHandle {
+        stop_flag: stop_flag.clone(),
+        paused_flag: paused_flag.clone(),
+        finished_flag: finished_flag.clone(),
+        played_samples: played_samples.clone(),
+        total_samples,
+    };
+
+    if samples.is_empty() {
+        finished_flag.store(true, Ordering::Relaxed);
+        return handle;
+    }
+
+    thread::spawn(move || {
+        // A few seconds of headroom is enough now that feeding is chunked
+        // (not "push the whole 12s clip up front") - the ring only ever
+        // needs to hold a little more than the render thread drains per
+        // wake-up, not the entire clip at once.
+        let (mut producer, consumer) = make_ring_buffer(2.0);
+        let counters = Arc::new(dsp_core::FrameCounters::default());
+        let render = match &device_id {
+            Some(id) => HardwareRender::start_on_device_id(id, consumer, counters),
+            None => HardwareRender::start_default(consumer, counters),
+        };
+        let render = match render {
+            Ok(r) => r,
+            Err(e) => {
+                crate::log_error!(
+                    "[clearnairt] failed to open the selected playback device ({device_id:?}) for recording playback: {e:#}"
+                );
+                finished_flag.store(true, Ordering::Relaxed);
+                return;
+            }
+        };
+
+        // REAL BUG, FOUND AND FIXED HERE: an earlier version of this loop
+        // fed samples into the ring as fast as the ring's backpressure
+        // allowed (up to its full 2s capacity), then - once `pos` reached
+        // `samples.len()` - waited only a fixed 300ms before calling
+        // `render.stop()`. For anything longer than ~2.3s, that meant the
+        // render thread could still have up to ~2 real seconds of
+        // genuinely unplayed audio sitting in the ring when it was torn
+        // down - the TAIL of the recording (often literally the last few
+        // words spoken) was silently cut off. Observed and reported as
+        // "missing the last few words" during real testing - a genuine
+        // regression, not a hypothetical one.
+        //
+        // Fix: pace the feed loop itself to real time (never push more
+        // than the clip's own elapsed real-world duration justifies), so
+        // by the time this loop naturally finishes, real time has already
+        // elapsed for the WHOLE clip and only a small, bounded amount
+        // (the ring's own tiny remaining backlog + the WASAPI device
+        // buffer) is left - which the short fixed sleep after the loop
+        // can actually cover. `paused_accum` subtracts out any time spent
+        // paused, so pausing doesn't make this pacing think more real
+        // time has passed than actually has.
+        const FEED_CHUNK: usize = 480; // one FRAME_SAMPLES' worth per iteration
+        let mut pos = 0usize;
+        let playback_clock_start = std::time::Instant::now();
+        let mut paused_accum = std::time::Duration::ZERO;
+        let mut pause_started: Option<std::time::Instant> = None;
+
+        while pos < samples.len() {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            if paused_flag.load(Ordering::Relaxed) {
+                if pause_started.is_none() {
+                    pause_started = Some(std::time::Instant::now());
+                }
+                thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            if let Some(p) = pause_started.take() {
+                paused_accum += p.elapsed();
+            }
+
+            let target_elapsed = std::time::Duration::from_secs_f32(pos as f32 / dsp_core::SAMPLE_RATE_HZ as f32);
+            let real_elapsed = playback_clock_start.elapsed().saturating_sub(paused_accum);
+            if real_elapsed < target_elapsed {
+                // Running ahead of real playback time - wait rather than
+                // keep stuffing the ring, so this loop's own completion
+                // tracks real elapsed playback time, not "how fast could
+                // this thread possibly push samples."
+                thread::sleep((target_elapsed - real_elapsed).min(std::time::Duration::from_millis(20)));
+                continue;
+            }
+
+            let end = (pos + FEED_CHUNK).min(samples.len());
+            for &sample in &samples[pos..end] {
+                // A push failure means the ring is momentarily full (the
+                // render thread hasn't drained yet) - back off briefly
+                // and retry this same sample rather than dropping it.
+                while producer.push(sample).is_err() {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            pos = end;
+            played_samples.store(pos, Ordering::Relaxed);
+        }
+
+        // Only a small, bounded backlog should remain now (see the real-
+        // time pacing above) - this covers it plus the WASAPI device
+        // buffer, not a multi-second tail.
+        thread::sleep(std::time::Duration::from_millis(300));
+        render.stop();
+        finished_flag.store(true, Ordering::Relaxed);
+    });
+
+    handle
+}

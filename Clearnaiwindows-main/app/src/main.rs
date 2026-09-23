@@ -90,6 +90,8 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
             // engine handle set makes the failure visible (status stays
             // Bypass, no audio flows) instead of the whole app vanishing
             // with no explanation.
+            let (_tap, target_speaker_store, enrollment, _enrollment_warning, tse_speaker_store, vanta_speaker_store) =
+                shared::build_enrollment_subsystem();
             let handles = shared::EngineHandles::new_from_settings(
                 settings,
                 false,
@@ -97,6 +99,16 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
                 false,
                 Some("engine failed to start; see stderr log".to_string()),
                 vec![format!("Audio engine failed to start: {e:#}")],
+                false,
+                Some("engine failed to start; see stderr log".to_string()),
+                false,
+                Some("engine failed to start; see stderr log".to_string()),
+                false,
+                Some("engine failed to start; see stderr log".to_string()),
+                target_speaker_store,
+                tse_speaker_store,
+                vanta_speaker_store,
+                enrollment,
             );
             gui::Initial {
                 settings: settings.clone(),
@@ -119,6 +131,8 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
     // exercises this path, even though it's never real on this platform.
     let bvc_dir = setup::app_data_dir();
     let bvc_extraction_error = setup::ensure_bvc_assets_extracted(&bvc_dir).err().map(|e| format!("{e:#}"));
+    let (_tap, target_speaker_store, enrollment, _enrollment_warning, tse_speaker_store, vanta_speaker_store) =
+        shared::build_enrollment_subsystem();
     let handles = shared::EngineHandles::new_from_settings(
         settings,
         false,
@@ -126,6 +140,16 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
         false,
         Some("not running on Windows".to_string()),
         Vec::new(),
+        false,
+        Some("not running on Windows".to_string()),
+        false,
+        Some("not running on Windows".to_string()),
+        false,
+        Some("not running on Windows".to_string()),
+        target_speaker_store,
+        tse_speaker_store,
+        vanta_speaker_store,
+        enrollment,
     );
     gui::Initial {
         settings: settings.clone(),

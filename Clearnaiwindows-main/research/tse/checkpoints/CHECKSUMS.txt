@@ -1,0 +1,25 @@
+REAL-TSE / WeSep checkpoint bundle — SHA-256 checksums
+Computed in this research session via: certutil -hashfile <file> SHA256
+Source: https://github.com/REAL-TSE/wesep-real-tse (README's Google Drive link)
+Download URL used: https://drive.google.com/uc?export=download&id=1M4UqK2A2EeHmQ0pCevYqBgaYn3RvklgC
+
+real-tse-ckpt.zip (1,048,798,335 bytes)
+  SHA256: 0a7e44050b1235db209181d7cda29ac93487fbb981ec768d3062b3243c49ce98
+
+spk_emb_causal_100/avg_model.pt (251,856,016 bytes)  <- selected candidate
+  SHA256: 42b73219eefefcbba4b5da0dcb89dce292359c9f93b1a951c7b6d196da2155b3
+
+spk_emb_causal_100/config.yaml (2,487 bytes)
+  SHA256: 80820eb78de6639160f7124d09cbacbc8397e321d8075721e89edb7cec50a0fa
+
+Other variants in the same bundle (downloaded, not run in this session):
+  spk_emb_100/avg_model.pt            282,698,632 bytes
+  tfmap_context_100/avg_model.pt      309,111,559 bytes
+  tfmap_context_causal_100/avg_model.pt  278,268,439 bytes
+(checksums not computed for these three - not used in this research phase)
+
+Verification: spk_emb_causal_100's avg_model.pt was loaded into the real
+TSE_BSRNN_SPK model class (from the cloned repo's own source) with
+strict=True and produced ZERO missing keys and ZERO unexpected keys,
+confirming this exact file's weights match the exact architecture in
+config.yaml.

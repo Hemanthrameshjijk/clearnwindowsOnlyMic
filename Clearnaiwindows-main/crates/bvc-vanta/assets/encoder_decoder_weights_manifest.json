@@ -1,0 +1,1 @@
+{"audio_encoder.conv.weight": {"shape": [512, 1, 16], "offset": 0, "length": 8192}, "audio_decoder.deconv.weight": {"shape": [512, 1, 16], "offset": 32768, "length": 8192}}

@@ -8,7 +8,8 @@
 ;
 ; Deliberately installs to the SAME directory the app already uses for its
 ; self-extracted BVC assets (%LOCALAPPDATA%\ClearNAI\weya_nc.dll, the model
-; tar.gz, settings.json, clearnai.log - see app/src/setup.rs::app_data_dir)
+; tar.gz, onnxruntime.dll, settings.json, clearnai.log - see
+; app/src/setup.rs::app_data_dir)
 ; rather than Program Files: this app never needs admin rights for anything
 ; else it does, so an admin-requiring install would be an unnecessary extra
 ; UAC prompt, and installing to the very directory the app already treats
@@ -25,6 +26,16 @@
 !define APP_PUBLISHER "ClearNAI"
 !define APP_VERSION "0.1.0"
 !define UNINSTALL_REG_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+
+; Third-party VB-Audio VB-CABLE driver installer, bundled here ONLY for
+; this personal, non-commercial build (see the "VB-CABLE Virtual Audio
+; Driver" section below for the licensing/elevation caveats - re-read them
+; before ever reusing this for a build given to anyone else). Download the
+; real installer yourself from VB-Audio's official site and place the
+; extracted exe at this exact path before running makensis - this script
+; does not fetch it for you, and `makensis` will fail with a clear
+; "file not found" error if it's missing, rather than silently skipping it.
+!define VBCABLE_INSTALLER "vendor\VBCABLE_Setup_x64.exe"
 
 Name "${APP_NAME}"
 OutFile "..\target\release\ClearNAI-Setup.exe"
@@ -66,6 +77,54 @@ Section "Install"
   WriteRegStr HKCU "${UNINSTALL_REG_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegDWORD HKCU "${UNINSTALL_REG_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTALL_REG_KEY}" "NoRepair" 1
+SectionEnd
+
+Section "VB-CABLE Virtual Audio Driver"
+  ; Runs AFTER ClearNAI's own per-user install above (Section "Install") -
+  ; "first ClearNAI, then the driver," per explicit instruction. This is a
+  ; THIRD-PARTY kernel-mode driver (VB-Audio Software's VB-CABLE), not part
+  ; of ClearNAI - see docs/VIRTUAL_DEVICES.md for why ClearNAI needs a
+  ; virtual cable at all. Bundled directly into this installer ONLY
+  ; because this specific build is for personal, non-commercial use -
+  ; VB-Audio's donationware terms do not grant blanket redistribution
+  ; rights for a commercial product, so this section must be re-evaluated
+  ; (and VB-Audio contacted for explicit permission) before ever reusing
+  ; this installer.nsi for a build distributed to other people.
+  ;
+  ; Driver installation genuinely requires admin rights - unlike
+  ; ClearNAI's own per-user install (`RequestExecutionLevel user` above,
+  ; deliberately unchanged), VB-CABLE's own installer requests its own
+  ; elevation when launched, so Windows shows a UAC prompt for just this
+  ; one step rather than requiring this whole installer to run elevated.
+  ;
+  ; Deliberately launches VB-CABLE's own installer UI rather than guessing
+  ; an undocumented silent-install command-line flag - VB-Audio's real,
+  ; current switches were not independently verified here, and getting one
+  ; wrong (e.g. accidentally uninstalling instead of installing) is worse
+  ; than one extra click. Click "Install Driver" in the window that opens.
+  ;
+  ; `/nonfatal`: this personal build's vendor/ file is deliberately NOT
+  ; committed to the repo (see .gitignore) - CI (.github/workflows/windows.yml)
+  ; builds this same script without it, and must keep succeeding, just
+  ; without this section's behavior, rather than breaking the whole
+  ; pipeline over a file that should never be checked in.
+  SetOutPath "$TEMP"
+  File /nonfatal "${VBCABLE_INSTALLER}"
+
+  IfFileExists "$TEMP\VBCABLE_Setup_x64.exe" 0 skip_vbcable
+    DetailPrint "Launching the VB-CABLE driver installer - click Install Driver in the window that opens (it will show its own admin prompt)..."
+    ExecWait "$TEMP\VBCABLE_Setup_x64.exe" $0
+    DetailPrint "VB-CABLE installer closed (exit code $0)."
+    Delete "$TEMP\VBCABLE_Setup_x64.exe"
+
+    ; VB-Audio's own documentation recommends a reboot for the driver to
+    ; register reliably - ask, never force a silent unexpected reboot.
+    MessageBox MB_YESNO|MB_ICONQUESTION \
+      "VB-CABLE setup has finished.$\r$\n$\r$\nA system restart is recommended before using the virtual cable with ClearNAI. Restart now?" \
+      IDNO skip_reboot
+    Reboot
+    skip_reboot:
+  skip_vbcable:
 SectionEnd
 
 Section "Uninstall"

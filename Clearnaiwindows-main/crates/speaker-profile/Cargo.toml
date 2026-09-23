@@ -1,0 +1,13 @@
+[package]
+name = "speaker-profile"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Lock-free "publish latest value, read without blocking" cell. Used for
+# `TargetSpeakerStore`: the realtime TSE stage must be able to read the
+# currently-enrolled profile (or "none") every 10ms frame without taking a
+# `Mutex` that an enrollment-thread write could ever hold across a lock
+# acquisition on the audio thread - see this crate's `store` module docs.
+# Pure Rust, no OS/FFI surface, same portability profile as `dsp-core`.
+arc-swap = "1"

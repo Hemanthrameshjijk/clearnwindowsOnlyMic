@@ -1,0 +1,19 @@
+[package]
+name = "bvc-vanta"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dsp-core = { path = "../dsp-core" }
+tse-engine = { path = "../tse-engine" }
+tse-bsrnn = { path = "../tse-bsrnn" }
+speaker-profile = { path = "../speaker-profile" }
+kaldi-native-fbank = "0.1"
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["load-dynamic"] }
+ndarray = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+
+[dev-dependencies]
+rand = "0.8"

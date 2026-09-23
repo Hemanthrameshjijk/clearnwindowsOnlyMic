@@ -1,0 +1,16 @@
+Scenario 'reverberation' skipped: no RIR/reverb data available in this environment.
+
+=== Synthetic-signal sanity benchmark (NOT a real-speech quality measurement) ===
+[target_only                     ] input_SI-SDR= 114.59 dB  output_SI-SDR= -18.90 dB  delta=-133.49 dB  finite=True
+[target_plus_one_background      ] input_SI-SDR=  -0.00 dB  output_SI-SDR= -45.13 dB  delta=-45.13 dB  finite=True
+[target_plus_two_background      ] input_SI-SDR=  -3.01 dB  output_SI-SDR= -22.16 dB  delta=-19.15 dB  finite=True
+[target_plus_noise               ] input_SI-SDR=   6.56 dB  output_SI-SDR=  -1.24 dB  delta= -7.81 dB  finite=True
+[target_plus_noise_plus_bg       ] input_SI-SDR=  -0.23 dB  output_SI-SDR= -14.88 dB  delta=-14.65 dB  finite=True
+[overlapping_speech              ] input_SI-SDR=  -0.00 dB  output_SI-SDR= -45.48 dB  delta=-45.48 dB  finite=True
+[target_starts_stops             ] input_SI-SDR=  -3.01 dB  output_SI-SDR=  19.60 dB  delta=+22.61 dB  finite=True
+[background_starts_stops         ] input_SI-SDR=   3.01 dB  output_SI-SDR= -46.69 dB  delta=-49.71 dB  finite=True
+[silence                         ] input_SI-SDR=   0.00 dB  output_SI-SDR=   0.00 dB  delta= +0.00 dB  finite=True
+[near_end_target                 ] input_SI-SDR=  18.06 dB  output_SI-SDR= -30.32 dB  delta=-48.38 dB  finite=True
+[far_end_target                  ] input_SI-SDR= -18.06 dB  output_SI-SDR=  -0.40 dB  delta=+17.66 dB  finite=True
+
+mean SI-SDR improvement across scenarios: -29.41 dB (synthetic tones only - see module docstring)

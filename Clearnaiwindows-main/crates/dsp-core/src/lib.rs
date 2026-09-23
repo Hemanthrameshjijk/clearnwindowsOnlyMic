@@ -13,6 +13,7 @@ pub use rtrb::{Consumer, Producer, RingBuffer};
 mod agc;
 mod clock;
 mod metrics;
+mod voice_gate;
 mod watchdog;
 
 pub use agc::AutoGainStage;
@@ -20,6 +21,7 @@ pub use clock::{FrameConfig, FrameDeadline, DEFAULT_FRAME_CONFIG};
 pub use metrics::{
     classify_status, compute_percentiles, FrameCounters, LatencyLog, Percentiles, RealtimeStatus,
 };
+pub use voice_gate::VoiceGateStage;
 pub use watchdog::WatchdogStage;
 
 /// A lock-free on/off switch for one pipeline stage. The GUI thread flips

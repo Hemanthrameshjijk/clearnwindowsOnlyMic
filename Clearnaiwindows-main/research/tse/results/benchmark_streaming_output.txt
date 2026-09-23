@@ -1,0 +1,18 @@
+Naive growing-buffer probe: 50 chunks x 10ms (160 samples @ 16000Hz) = 500ms total audio
+(O(n^2): each 'chunk' re-processes the entire buffer so far - see module docstring)
+
+Note: buffers shorter than the 512-sample STFT window are rejected by torch.stft (confirmed by an actual RuntimeError on chunk 1-3); probe starts at chunk 4 (buffer=640 samples = 40ms).
+
+  chunk   4 (buffer=  40ms):   107.96 ms
+  chunk  10 (buffer= 100ms):   151.10 ms
+  chunk  25 (buffer= 250ms):   303.75 ms
+  chunk  50 (buffer= 500ms):   523.20 ms
+
+Per-call latency across 50 calls (naive growing-buffer, NOT true streaming):
+  P50:    310.80 ms
+  P90:    477.27 ms
+  P95:    506.56 ms
+  P99:    539.90 ms
+  MAX:    539.90 ms
+
+10ms deadline: the very first (smallest-buffer) call took 107.96 ms; by chunk 50 (buffer=500ms) the naive re-processing cost had grown to 523.20 ms. This growth is an artifact of the naive O(n^2) probe, not evidence about a real incremental implementation's cost - see module docstring.
