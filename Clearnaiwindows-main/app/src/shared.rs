@@ -3,7 +3,7 @@
 //! touches an OS audio API, so it compiles and its tests run natively on
 //! Linux as well as when cross-checked for Windows.
 
-use dsp_core::{FrameCounters, LatencyLog, SharedPreset, Stage, StageToggle};
+use dsp_core::{FrameCounters, LatencyLog, SharedPreset, Stage, StageToggle, WatchdogStatus};
 use speaker_profile::TargetSpeakerStore;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -609,6 +609,23 @@ pub struct EngineHandles {
     pub mic_bpo_v1_available: bool,
     /// Mirrors `mic_bvc_unavailable_reason`.
     pub mic_bpo_v1_unavailable_reason: Option<String>,
+    /// Honest, live status of the default mic Hush backend's watchdog -
+    /// `None` when no real backend loaded at all (nothing to ever bypass;
+    /// `mic_bvc_available` already covers that honestly), `Some` and
+    /// checked via `WatchdogStatus::is_bypassed()` once a real
+    /// `HushBvcStage` is actually running behind its `dsp_core::WatchdogStage`.
+    /// Exists so the GUI can tell "Hush is on and running" apart from "Hush
+    /// was auto-bypassed after repeated stalls and is now passing audio
+    /// through unprocessed" - before this field existed, both looked
+    /// identical from the GUI's side (the "on" toggle doesn't know the
+    /// difference), which made a real listening test of Hush impossible to
+    /// trust. Set post-construction by the real Windows engine
+    /// (`engine::start`), same "construct inert, then wire the real thing"
+    /// pattern as `device_switcher`/`bvc_backend` below.
+    pub mic_hush_status: Option<WatchdogStatus>,
+    /// Same as `mic_hush_status`, for the `Hush (bpo_v1)` backend's own,
+    /// independent watchdog.
+    pub mic_bpo_v1_status: Option<WatchdogStatus>,
     /// The enrolled target speaker (or none), read by the realtime TSE
     /// stage via `tse_engine::TseStageAdapter` and written by
     /// `enrollment`'s worker thread - never touched directly by the GUI or
@@ -718,6 +735,10 @@ impl EngineHandles {
             mic_vanta_unavailable_reason,
             mic_bpo_v1_available,
             mic_bpo_v1_unavailable_reason,
+            // Overwritten post-construction by the real Windows engine once
+            // the real `WatchdogStage`s exist - see `mic_hush_status`'s docs.
+            mic_hush_status: None,
+            mic_bpo_v1_status: None,
             target_speaker_store,
             tse_speaker_store,
             vanta_speaker_store,

@@ -462,14 +462,37 @@ pub fn start(
     // permanently bypassed (no more worker-thread round trips at all) -
     // stopping the compounding pileup far sooner than before.
     const BVC_WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+    // Wrapped in a `WatchdogStage` for the same real reason every other BVC
+    // backend in this file is: this is a closed-source DLL call, and real
+    // hardware testing found it can block the pipeline thread entirely, for
+    // a minute-plus, with no error. Removing the watchdog entirely (an
+    // earlier revision of this code briefly did) traded that bounded-time
+    // guarantee away just to fix a real but separate problem: once tripped,
+    // the watchdog bypasses the backend permanently and silently, with
+    // nothing surfaced outside `dsp_core` - so the GUI's "BVC: on" toggle
+    // kept reading "on" even after Hush had stopped actually running,
+    // making a real-world listening test impossible to trust. The actual
+    // fix is `mic_hush_status` below: a `dsp_core::WatchdogStatus` handle
+    // captured from the real stage BEFORE it's boxed and moved into the
+    // pipeline, read by the GUI (see `EngineHandles::mic_hush_bypassed`) so
+    // a genuinely stalled-and-bypassed Hush is reported honestly instead of
+    // silently misrepresented as still running.
+    // `None` when no real backend loaded at all (nothing to ever bypass -
+    // `mic_bvc_available` already covers that case honestly); `Some` only
+    // when a real `HushBvcStage` is actually running behind the watchdog.
+    let mut mic_hush_status: Option<dsp_core::WatchdogStatus> = None;
     let mic_hush_stage: Box<dyn Stage> = match mic_bvc_load {
-        Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
-            "mic BVC",
-            Box::new(stage),
-            BVC_WATCHDOG_TIMEOUT,
-            |msg| crate::log_error!("[clearnairt] {msg}"),
-            || Box::new(audio_io::mmcss::elevate_current_thread()),
-        )),
+        Ok(stage) => {
+            let watchdog = dsp_core::WatchdogStage::new(
+                "mic BVC",
+                Box::new(stage),
+                BVC_WATCHDOG_TIMEOUT,
+                |msg| crate::log_error!("[clearnairt] {msg}"),
+                || Box::new(audio_io::mmcss::elevate_current_thread()),
+            );
+            mic_hush_status = Some(watchdog.status());
+            Box::new(watchdog)
+        }
         Err(_) => Box::new(NoOpStage("BVC (unavailable)")),
     };
 
@@ -523,14 +546,21 @@ pub fn start(
         Ok(_) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     };
+    // Same watchdog + observable-status pattern as `mic_hush_stage` above,
+    // for the same closed-source-DLL reason.
+    let mut mic_bpo_v1_status: Option<dsp_core::WatchdogStatus> = None;
     let mic_bpo_v1_stage: Box<dyn Stage> = match mic_hush_bpo_v1_load {
-        Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
-            "mic Hush (bpo_v1)",
-            Box::new(stage),
-            BVC_WATCHDOG_TIMEOUT,
-            |msg| crate::log_error!("[clearnairt] {msg}"),
-            || Box::new(audio_io::mmcss::elevate_current_thread()),
-        )),
+        Ok(stage) => {
+            let watchdog = dsp_core::WatchdogStage::new(
+                "mic Hush (bpo_v1)",
+                Box::new(stage),
+                BVC_WATCHDOG_TIMEOUT,
+                |msg| crate::log_error!("[clearnairt] {msg}"),
+                || Box::new(audio_io::mmcss::elevate_current_thread()),
+            );
+            mic_bpo_v1_status = Some(watchdog.status());
+            Box::new(watchdog)
+        }
         Err(_) => Box::new(NoOpStage("BVC Hush bpo_v1 (unavailable)")),
     };
 
@@ -777,6 +807,12 @@ pub fn start(
     // for `device_switcher` below.
     handles.bvc_backend = bvc_backend_selector;
     handles.speaker_bvc_backend = speaker_bvc_backend_selector;
+    // See `mic_hush_status`/`mic_bpo_v1_status`'s docs - wire in the real
+    // watchdog status handles captured when each `HushBvcStage` was
+    // actually constructed above, same "construct inert, then wire the
+    // real thing" pattern.
+    handles.mic_hush_status = mic_hush_status;
+    handles.mic_bpo_v1_status = mic_bpo_v1_status;
 
     // --- Ring buffers. 2 seconds of headroom at 48kHz is generous relative
     // to the 10ms frame size; sized once here, never resized (a live device
@@ -1134,6 +1170,20 @@ fn spawn_mic_pipeline(
             // this removes the dependency on the user having set Windows'
             // mic gain correctly).
             let mut auto_gain = dsp_core::AutoGainStage::new();
+            // Enrollment's own reference encoders expect audio built from
+            // the pre-Noise/BVC/Studio signal, auto-gained the same way the
+            // main pipeline always auto-gains it - see `enrollment`'s crate
+            // docs. Once BVC could run BEFORE AutoGain (see the BVC-on
+            // branch below), the main `frame` reaching
+            // `enrollment_tap.push_frame_if_active` would sometimes already
+            // be colored by BVC, which must never happen. A second,
+            // independent `AutoGainStage` instance (its own gain-tracking
+            // state, never shared with the main pipeline's `auto_gain`)
+            // plus a preallocated scratch buffer let enrollment always see
+            // a pre-BVC, auto-gained copy, regardless of which branch the
+            // main frame takes - with no per-frame allocation.
+            let mut enroll_gain = dsp_core::AutoGainStage::new();
+            let mut enroll_frame = vec![0.0f32; FRAME_SAMPLES];
             loop {
                 pull_frame_blocking(&mic_in, &mut frame, &handles.counters);
                 let started = Instant::now();
@@ -1157,18 +1207,48 @@ fn spawn_mic_pipeline(
                 // Must run BEFORE auto_gain - see `dsp_core::VoiceGateStage`'s
                 // docs and `mic_voice_gate_stage`'s construction comment above.
                 run_if_enabled(voice_gate_stage.as_mut(), &handles.mic_voice_gate, &mut frame);
-                auto_gain.process(&mut frame);
-                // Reference-enrollment tap: reads the same auto-gained,
-                // pre-Noise/BVC/Studio signal a real "clean voice reference"
-                // should be built from - see `enrollment`'s crate docs on
-                // why this sits here rather than after BVC/Studio (which
-                // would color the target-speaker embedding with whatever
-                // those stages did on that particular take). A no-op
-                // (single relaxed atomic load) unless a recording is
-                // actually in progress.
-                enrollment_tap.push_frame_if_active(&frame);
-                run_if_enabled(noise_stage.as_mut(), &handles.mic_noise, &mut frame);
-                run_if_enabled(bvc_stage.as_mut(), &handles.mic_bvc, &mut frame);
+
+                // Enrollment tap: ALWAYS reads a pre-Noise/BVC/Studio,
+                // auto-gained copy of the signal - per `enrollment`'s own
+                // docs, a real "clean voice reference" must never be built
+                // from anything BVC/Studio touched, regardless of which
+                // branch below the main `frame` takes. Taken here, before
+                // the BVC-on/off split, so this is unconditionally correct
+                // even when BVC runs first in the branch below.
+                enroll_frame.copy_from_slice(&frame);
+                enroll_gain.process(&mut enroll_frame);
+                enrollment_tap.push_frame_if_active(&enroll_frame);
+
+                // Real finding: when BVC (Hush/DeepFilterNet/etc, whichever
+                // the router has selected) is on, running AutoGain and
+                // RNNoise ahead of it was actively counterproductive -
+                // AutoGain boosted quiet background voices (e.g. a
+                // neighbour talking during the user's own silent pauses)
+                // up toward the target level BEFORE BVC ever saw them,
+                // undoing exactly the contrast BVC needs to tell "target
+                // speaker" from "background" apart; and RNNoise had
+                // already reshaped the signal (its own denoising) before
+                // handing it to a backend that does its own denoising
+                // internally, double-processing audio that was never
+                // trained for that. So: when BVC is on, it runs FIRST,
+                // directly on the raw post-voice-gate mic signal, RNNoise
+                // is skipped entirely (BVC already suppresses noise), and
+                // AutoGain runs AFTER BVC instead of before it. When BVC is
+                // off, the original order (AutoGain -> RNNoise -> BVC
+                // no-op) is unchanged.
+                if handles.mic_bvc.is_on() {
+                    bvc_stage.process(&mut frame);
+                    auto_gain.process(&mut frame);
+                } else {
+                    auto_gain.process(&mut frame);
+                    run_if_enabled(noise_stage.as_mut(), &handles.mic_noise, &mut frame);
+                    // `handles.mic_bvc` is already known false here, so this
+                    // is a no-op - kept as `run_if_enabled` (rather than
+                    // skipped outright) only so a live toggle flip between
+                    // this check and the next frame can't leave BVC
+                    // permanently unrun; see `run_if_enabled`'s docs.
+                    run_if_enabled(bvc_stage.as_mut(), &handles.mic_bvc, &mut frame);
+                }
                 run_if_enabled(studio_stage.as_mut(), &handles.mic_studio, &mut frame);
 
                 let peak = frame.iter().fold(0.0f32, |m, &s| m.max(s.abs()));

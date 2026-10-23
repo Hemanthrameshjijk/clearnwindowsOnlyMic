@@ -22,7 +22,7 @@ pub use metrics::{
     classify_status, compute_percentiles, FrameCounters, LatencyLog, Percentiles, RealtimeStatus,
 };
 pub use voice_gate::VoiceGateStage;
-pub use watchdog::WatchdogStage;
+pub use watchdog::{WatchdogStage, WatchdogStatus};
 
 /// A lock-free on/off switch for one pipeline stage. The GUI thread flips
 /// it; the realtime audio callback reads it every frame with `Relaxed`

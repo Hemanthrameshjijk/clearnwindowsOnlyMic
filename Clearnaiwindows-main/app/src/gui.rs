@@ -950,6 +950,22 @@ fn view_main(state: &MainState) -> Element<'_, Message> {
             .color(Color::from_rgb(0.85, 0.2, 0.2))
             .into(),
         ),
+        // Honest report of a real failure mode that otherwise looks
+        // identical to "Hush is on and working": the backend's own
+        // watchdog gave up on it after repeated stalls and has bypassed it
+        // for the rest of this session - see `EngineHandles::mic_hush_status`'s
+        // docs. Checked only once `mic_bvc_available` is already true
+        // (loaded fine at startup, failed later), so it never overlaps with
+        // the arm above.
+        BvcBackend::Hush if state.handles.mic_hush_status.as_ref().is_some_and(|s| s.is_bypassed()) => Some(
+            text(
+                "Hush stopped responding and has been bypassed for the rest of this session; \
+                 audio is passing through unprocessed. Restart the app to try again.",
+            )
+            .size(12)
+            .color(Color::from_rgb(0.85, 0.2, 0.2))
+            .into(),
+        ),
         BvcBackend::Tse if !state.handles.tse_available => Some(
             text(format!(
                 "TSE is unavailable: {}",
@@ -1000,6 +1016,17 @@ fn view_main(state: &MainState) -> Element<'_, Message> {
                 "bpo_v1 is unavailable: {}",
                 state.handles.mic_bpo_v1_unavailable_reason.as_deref().unwrap_or("model failed to load")
             ))
+            .size(12)
+            .color(Color::from_rgb(0.85, 0.2, 0.2))
+            .into(),
+        ),
+        // Mirrors the `BvcBackend::Hush` bypass-report arm above - see
+        // `EngineHandles::mic_bpo_v1_status`'s docs.
+        BvcBackend::HushBpoV1 if state.handles.mic_bpo_v1_status.as_ref().is_some_and(|s| s.is_bypassed()) => Some(
+            text(
+                "Hush (bpo_v1) stopped responding and has been bypassed for the rest of this session; \
+                 audio is passing through unprocessed. Restart the app to try again.",
+            )
             .size(12)
             .color(Color::from_rgb(0.85, 0.2, 0.2))
             .into(),

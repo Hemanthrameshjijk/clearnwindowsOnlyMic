@@ -23,3 +23,9 @@ app/vendor/
 # crates/bvc-vanta/assets/; this ~190MB directory is redundant research
 # trail, not shippable product.
 poc/
+
+# Local backups of bundled model assets (e.g. app/assets/bpo_v1_onnx.tar.gz
+# before swapping in a new checkpoint) - working copies only, never
+# committed; the real shipped asset is whatever's at app/assets/*.tar.gz,
+# and git history is the actual record of previous versions.
+app/assets/backup/

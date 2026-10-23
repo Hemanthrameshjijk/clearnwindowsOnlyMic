@@ -34,7 +34,9 @@
 //! lifetime and dropped (reverting elevation) only on thread exit, matching
 //! `audio_io::mmcss::MmcssGuard`'s RAII contract.
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -44,12 +46,41 @@ use crate::Stage;
 /// considered permanently wedged and bypassed for good.
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 3;
 
+/// A cheap, cloneable, thread-safe handle onto a `WatchdogStage`'s bypass
+/// state - obtained via `WatchdogStage::status()` *before* the stage is
+/// boxed as `Box<dyn Stage>` and moved into the realtime pipeline, so a
+/// caller on another thread (in practice, the GUI) can honestly show
+/// whether a backend is actually still running or has been silently
+/// auto-bypassed after repeated stalls.
+///
+/// Real problem this fixes: before this type existed, a `WatchdogStage`
+/// that tripped `MAX_CONSECUTIVE_TIMEOUTS` would bypass itself permanently
+/// with no way for anything outside this module to find out - the GUI's
+/// "BVC: on" toggle stayed showing "on" even once the backend had stopped
+/// actually running, making a real-world test of that backend impossible
+/// to trust (passing audio through unprocessed looks identical, from the
+/// toggle's perspective, to the backend genuinely running and not
+/// suppressing anything).
+#[derive(Clone)]
+pub struct WatchdogStatus(Arc<AtomicBool>);
+
+impl WatchdogStatus {
+    /// True once the wrapped stage has been permanently bypassed (either
+    /// `MAX_CONSECUTIVE_TIMEOUTS` stalls in a row, or its worker thread
+    /// died/disconnected) - from that point on, `WatchdogStage::process`
+    /// always leaves the frame untouched and never calls the wrapped stage
+    /// again for the rest of the process's life.
+    pub fn is_bypassed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub struct WatchdogStage {
     name: &'static str,
     to_worker: Sender<Vec<f32>>,
     from_worker: Receiver<Vec<f32>>,
     timeout: Duration,
-    bypassed: bool,
+    bypassed: Arc<AtomicBool>,
     consecutive_timeouts: u32,
     log: Box<dyn Fn(&str) + Send>,
 }
@@ -97,10 +128,21 @@ impl WatchdogStage {
             to_worker,
             from_worker,
             timeout,
-            bypassed: false,
+            bypassed: Arc::new(AtomicBool::new(false)),
             consecutive_timeouts: 0,
             log: Box::new(log),
         }
+    }
+
+    /// A cheap, cloneable handle onto this stage's bypass state - call this
+    /// before boxing the stage as `Box<dyn Stage>` and moving it into the
+    /// realtime pipeline (once boxed, this concrete type's methods are no
+    /// longer reachable), and hold the returned `WatchdogStatus` wherever
+    /// something outside the pipeline (in practice, `EngineHandles`, read
+    /// by the GUI) needs to honestly show whether this backend is still
+    /// actually running.
+    pub fn status(&self) -> WatchdogStatus {
+        WatchdogStatus(self.bypassed.clone())
     }
 }
 
@@ -110,12 +152,12 @@ impl Stage for WatchdogStage {
     }
 
     fn process(&mut self, frame: &mut [f32]) {
-        if self.bypassed {
+        if self.bypassed.load(Ordering::Relaxed) {
             return;
         }
 
         if self.to_worker.send(frame.to_vec()).is_err() {
-            self.bypassed = true;
+            self.bypassed.store(true, Ordering::Relaxed);
             (self.log)(&format!(
                 "[dsp-core] {} worker thread is gone; bypassing it for the rest of this session",
                 self.name
@@ -136,7 +178,7 @@ impl Stage for WatchdogStage {
                     self.name, self.timeout, self.consecutive_timeouts
                 ));
                 if self.consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
-                    self.bypassed = true;
+                    self.bypassed.store(true, Ordering::Relaxed);
                     (self.log)(&format!(
                         "[dsp-core] {} appears permanently stalled after {} consecutive \
                          timeouts; bypassing it for the rest of this session",
@@ -145,7 +187,7 @@ impl Stage for WatchdogStage {
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                self.bypassed = true;
+                self.bypassed.store(true, Ordering::Relaxed);
                 (self.log)(&format!(
                     "[dsp-core] {} worker thread disconnected; bypassing it for the rest of this session",
                     self.name
@@ -232,7 +274,7 @@ mod tests {
             let mut frame = [0.0f32; 4];
             stage.process(&mut frame);
         }
-        assert!(stage.bypassed, "stage must be marked permanently bypassed");
+        assert!(stage.bypassed.load(Ordering::Relaxed), "stage must be marked permanently bypassed");
         let log_count_before = logs.lock().unwrap().len();
 
         // Further calls must be free (no channel round trip / timeout wait)
@@ -251,5 +293,36 @@ mod tests {
             log_count_before,
             "no further logging once already bypassed"
         );
+    }
+
+    /// Exercises the real usage pattern this type exists for: take a
+    /// `WatchdogStatus` handle right after construction (before the stage
+    /// is boxed and moved into the pipeline, exactly like `engine.rs` does
+    /// for `EngineHandles`), then confirm it honestly reflects the stage's
+    /// bypass transition as observed through a completely independent
+    /// clone - not just the field the stage itself holds.
+    #[test]
+    fn watchdog_status_reflects_bypass_from_an_independent_handle() {
+        let mut stage = WatchdogStage::new(
+            "hangs-forever",
+            Box::new(HangsForever),
+            Duration::from_millis(20),
+            |_| {},
+            || Box::new(()),
+        );
+        let status = stage.status();
+        assert!(!status.is_bypassed(), "must not report bypassed before anything has gone wrong");
+
+        for _ in 0..MAX_CONSECUTIVE_TIMEOUTS {
+            let mut frame = [0.0f32; 4];
+            stage.process(&mut frame);
+        }
+
+        assert!(
+            status.is_bypassed(),
+            "a handle taken before the stage was ever processed must still observe the later bypass"
+        );
+        // A second, independently cloned handle must agree too.
+        assert!(status.clone().is_bypassed());
     }
 }
