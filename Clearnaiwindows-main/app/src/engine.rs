@@ -139,15 +139,25 @@ pub struct LiveAudioSwitcher {
     physical_mic: Mutex<Option<MicCapture>>,
     virtual_mic_render: Mutex<Option<HardwareRender>>,
     monitor_render: Mutex<Option<HardwareRender>>,
+    speaker_capture: Mutex<Option<MicCapture>>,
+    speaker_render: Mutex<Option<HardwareRender>>,
 
     mic_in_swap: SwapConsumer,
     mic_out_swap: SwapProducer,
     monitor_out_swap: SwapProducer,
+    speaker_in_swap: SwapConsumer,
+    speaker_out_swap: SwapProducer,
 
-    /// Shared with every WASAPI thread this switcher (re)starts, so overrun/
-    /// underrun telemetry keeps accumulating into the same counters across a
-    /// live device switch rather than resetting.
+    /// Shared with every MIC-path WASAPI thread this switcher (re)starts, so
+    /// overrun/underrun telemetry keeps accumulating into the same counters
+    /// across a live device switch rather than resetting.
     counters: Arc<dsp_core::FrameCounters>,
+    /// Same idea, but for the speaker-outbound path's two roles - a
+    /// SEPARATE counters instance from `counters` above, so the GUI can
+    /// show each pipeline's drop/overrun/underrun telemetry independently
+    /// rather than one merged number that can't tell you which direction
+    /// is unhealthy.
+    speaker_counters: Arc<dsp_core::FrameCounters>,
 }
 
 impl LiveAudioSwitcher {
@@ -222,12 +232,59 @@ impl LiveDeviceSwitcher for LiveAudioSwitcher {
         }
     }
 
-    /// Speaker-outbound (Pipeline 2) is disabled for this session - see
-    /// `start()`. Deliberately does not open the requested device at all
-    /// (unlike before, when this would open a capture device that fed a
-    /// pipeline thread which no longer exists) - an honest no-op instead of
-    /// silently wasting a device handle on nothing.
-    fn set_virtual_speaker_source(&self, _device_id: Option<String>) {}
+    /// Restarts the speaker-outbound path's capture device, reconnecting the
+    /// speaker pipeline thread's input to a fresh ring buffer. `None` tears
+    /// the capture device down entirely (matching "no speaker source
+    /// selected" at boot) - the speaker pipeline thread keeps running but
+    /// has nothing to read from.
+    fn set_virtual_speaker_source(&self, device_id: Option<String>) {
+        match device_id {
+            Some(id) => {
+                let (producer, consumer) = make_ring_buffer(2.0);
+                match MicCapture::start_on_device_id(&id, producer, self.speaker_counters.clone()) {
+                    Ok(capture) => {
+                        *self.speaker_in_swap.lock().unwrap() = Some(consumer);
+                        Self::stop_and_replace_mic(&self.speaker_capture, Some(capture));
+                    }
+                    Err(e) => {
+                        crate::log_error!(
+                            "[clearnairt] failed to switch speaker-source capture live to '{id}' \
+                             ({e:#}); the previous speaker-source device (if any) keeps running."
+                        );
+                    }
+                }
+            }
+            None => {
+                *self.speaker_in_swap.lock().unwrap() = None;
+                Self::stop_and_replace_mic(&self.speaker_capture, None);
+            }
+        }
+    }
+
+    /// Restarts the speaker-outbound path's render device (the user's real
+    /// physical speakers/headphones), reconnecting the speaker pipeline
+    /// thread's output to a fresh ring buffer. `None` means "system default
+    /// output device" (matching `physical_mic`'s own convention), not
+    /// "disabled" - there's always a sensible real device to fall back to.
+    fn set_real_speaker_output(&self, device_id: Option<String>) {
+        let (producer, consumer) = make_ring_buffer(2.0);
+        let started = match device_id.as_deref() {
+            Some(id) => HardwareRender::start_on_device_id(id, consumer, self.speaker_counters.clone()),
+            None => HardwareRender::start_default(consumer, self.speaker_counters.clone()),
+        };
+        match started {
+            Ok(render) => {
+                *self.speaker_out_swap.lock().unwrap() = Some(producer);
+                Self::stop_and_replace_render(&self.speaker_render, Some(render));
+            }
+            Err(e) => {
+                crate::log_error!(
+                    "[clearnairt] failed to switch real speaker output live to {device_id:?} \
+                     ({e:#}); the previous speaker output (if any) keeps running."
+                );
+            }
+        }
+    }
 
     /// Restarts the monitor render device, reconnecting the mic pipeline
     /// thread's monitor output to a fresh ring buffer. `None` tears the
@@ -348,13 +405,18 @@ pub fn default_virtual_speaker_source(list: &DeviceList) -> Option<String> {
 /// which case the corresponding half of the pipeline is not started and a
 /// warning is added to `BootstrapOutcome`'s handles - this is not an error,
 /// since a first-time user has not necessarily installed/configured virtual
-/// cables yet.
+/// cables yet. `real_speaker_output_id` is the speaker-outbound path's
+/// render target (the user's real physical speakers/headphones) - `None`
+/// means the system default output device, NOT "disabled" (unlike the two
+/// virtual-cable ids above, there's always a sensible real device to fall
+/// back to).
 pub fn start(
     bvc_assets_dir: &Path,
     settings: &Settings,
     devices_list: DeviceList,
     virtual_mic_target_id: Option<&str>,
     virtual_speaker_source_id: Option<&str>,
+    real_speaker_output_id: Option<&str>,
 ) -> Result<BootstrapOutcome> {
     let mut warnings = Vec::new();
 
@@ -380,11 +442,26 @@ pub fn start(
     // from the WASAPI capture thread at all - i.e. something in the
     // pipeline blocked forever rather than erroring, and BVC's FFI call is
     // the only link in the chain that isn't our own pure-Rust code. Wrap it
-    // in a `WatchdogStage` so a wedged call gets a bounded timeout (well
-    // above the 10ms realtime deadline, since the DLL is allowed to be slow,
-    // just not infinite) instead of freezing the whole pipeline thread
-    // silently and permanently.
-    const BVC_WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+    // in a `WatchdogStage` so a wedged call gets a bounded timeout instead
+    // of freezing the whole pipeline thread silently and permanently.
+    //
+    // Real, second hardware finding (this session): 500ms was too generous
+    // once a SECOND, independent Hush session (the speaker path's own
+    // instance) exists and runs concurrently with the mic path's -
+    // `WatchdogStage::process` blocks the CALLING pipeline thread for up to
+    // this whole duration on every single frame while waiting on the
+    // worker-thread round trip (see `watchdog.rs`'s docs), so a genuinely
+    // struggling backend (two closed-source DLL sessions competing for CPU)
+    // can stall EITHER pipeline thread for up to 500ms repeatedly - long
+    // enough that it stops draining its own mic/speaker capture ring buffer
+    // in time, which is exactly the "ring buffer full, dropping frame"
+    // flood observed live on both paths simultaneously. Tightened to 50ms:
+    // still 5x the 10ms budget (room for real, ordinary DLL slowness), but
+    // `MAX_CONSECUTIVE_TIMEOUTS` (3) now trips after 150ms of real stalling
+    // instead of 1.5 real seconds, and once tripped the backend is
+    // permanently bypassed (no more worker-thread round trips at all) -
+    // stopping the compounding pileup far sooner than before.
+    const BVC_WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
     let mic_hush_stage: Box<dyn Stage> = match mic_bvc_load {
         Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
             "mic BVC",
@@ -424,6 +501,86 @@ pub fn start(
                 Box::new(NoOpStage("BVC DeepFilterNet (unavailable)")),
             ),
         };
+
+    // --- Hush (bpo_v1): a real fine-tune of Hush's own upstream checkpoint
+    // (pulp-vision/Hush, `deployment/models/model_best.ckpt`), NOT a
+    // separate architecture - see `bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME`'s
+    // docs. Loaded through `HushBvcStage::try_load_with_model`, reusing the
+    // SAME already-extracted `weya_nc.dll` as the default mic Hush instance
+    // above but pointing `weya_nc_model_load_from_path` at the different
+    // bundle. Safe to share the DLL module here (unlike the mic/speaker
+    // split, which needs two distinct on-disk DLL copies) because this
+    // instance and the default mic Hush instance never run concurrently -
+    // the BVC router dispatches to exactly one of them per frame, on the
+    // one mic pipeline thread. Added alongside, never replacing, the
+    // default `Hush` option above - both independently selectable.
+    let mic_hush_bpo_v1_load = bvc_hush::HushBvcStage::try_load_with_model(
+        bvc_assets_dir,
+        bvc_hush::DLL_FILE_NAME,
+        bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME,
+    );
+    let (mic_bpo_v1_available, mic_bpo_v1_unavailable_reason) = match &mic_hush_bpo_v1_load {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+    let mic_bpo_v1_stage: Box<dyn Stage> = match mic_hush_bpo_v1_load {
+        Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
+            "mic Hush (bpo_v1)",
+            Box::new(stage),
+            BVC_WATCHDOG_TIMEOUT,
+            |msg| crate::log_error!("[clearnairt] {msg}"),
+            || Box::new(audio_io::mmcss::elevate_current_thread()),
+        )),
+        Err(_) => Box::new(NoOpStage("BVC Hush bpo_v1 (unavailable)")),
+    };
+
+    // --- Speaker-path BVC: Off/Hush/DeepFilterNet only (see
+    // `tse_engine::SpeakerBvcBackend`'s docs - no TSE/Vanta, there's no way
+    // to enroll an arbitrary incoming caller's voice ahead of time). Each
+    // backend is its OWN independent instance from the mic path's - Hush
+    // via `SPEAKER_DLL_FILE_NAME` (a second on-disk DLL copy, already
+    // self-extracted by `setup::ensure_bvc_assets_extracted` specifically
+    // for this), DeepFilterNet via a second `load_bundled_deep_filter()`
+    // call (a fresh parse, no shared global state) - so a failure or a
+    // wedged call on one path never affects the other.
+    let speaker_bvc_load = bvc_hush::HushBvcStage::try_load_named(bvc_assets_dir, bvc_hush::SPEAKER_DLL_FILE_NAME);
+    let (speaker_bvc_available, speaker_bvc_unavailable_reason) = match &speaker_bvc_load {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+    let speaker_hush_stage: Box<dyn Stage> = match speaker_bvc_load {
+        Ok(stage) => Box::new(dsp_core::WatchdogStage::new(
+            "speaker BVC (Hush)",
+            Box::new(stage),
+            BVC_WATCHDOG_TIMEOUT,
+            |msg| crate::log_error!("[clearnairt] {msg}"),
+            || Box::new(audio_io::mmcss::elevate_current_thread()),
+        )),
+        Err(_) => Box::new(NoOpStage("Speaker BVC Hush (unavailable)")),
+    };
+
+    let (speaker_deep_filter_available, speaker_deep_filter_unavailable_reason, speaker_deep_filter_stage): (
+        bool,
+        Option<String>,
+        Box<dyn Stage>,
+    ) = match noise_engine::load_bundled_deep_filter() {
+        Ok(engine) => (
+            true,
+            None,
+            Box::new(dsp_core::WatchdogStage::new(
+                "speaker BVC (DeepFilterNet)",
+                Box::new(engine),
+                BVC_WATCHDOG_TIMEOUT,
+                |msg| crate::log_error!("[clearnairt] {msg}"),
+                || Box::new(audio_io::mmcss::elevate_current_thread()),
+            )),
+        ),
+        Err(e) => (
+            false,
+            Some(format!("DeepFilterNet failed to load ({e:#}); this BVC option is unavailable.")),
+            Box::new(NoOpStage("Speaker BVC DeepFilterNet (unavailable)")),
+        ),
+    };
 
     // --- Speaker-reference-enrollment subsystem + the BVC backend router
     // (Off/Hush/DeepFilterNet/TSE/Vanta) - see docs/TSE_ENROLLMENT.md. `target_speaker_store`
@@ -548,28 +705,25 @@ pub fn start(
         mic_deep_filter_stage,
         tse_stage,
         mic_vanta_stage,
+        mic_bpo_v1_stage,
     ));
-    // --- Speaker-outbound (Pipeline 2) has been deliberately disabled for
-    // this session, per a scoped decision to focus exclusively on the mic
-    // path: capture -> AEC/Noise/BVC/Studio -> virtual mic. Nothing below
-    // loads a second BVC session, opens the virtual-speaker-source capture
-    // device, or renders to real hardware for the outbound direction - see
-    // the removed `spawn_speaker_pipeline` (kept only in git history) and
-    // the honest "unavailable" status surfaced to the GUI here instead of
-    // silently trying and failing. The mic-side BVC/AEC/loopback-tap code
-    // above and below this block is untouched. ---
-    let speaker_bvc_available = false;
-    let speaker_bvc_unavailable_reason =
-        Some("Speaker-outbound processing is disabled for this session (mic-only focus).".to_string());
+    // --- Speaker-outbound (Pipeline 2) BVC router: Off/Hush/DeepFilterNet,
+    // built from the two independent instances constructed above. ---
+    let speaker_bvc_backend_selector = dsp_core::SharedPreset::new(settings.speaker_bvc_backend);
+    let speaker_bvc_stage: Box<dyn Stage> = Box::new(tse_engine::SpeakerBvcRouterStage::new(
+        speaker_bvc_backend_selector.clone(),
+        speaker_hush_stage,
+        speaker_deep_filter_stage,
+    ));
 
-    // --- Noise: RNNoise for both paths, per spec default. DeepFilter is a
-    // real, supported `NoiseEngineKind` in `noise-engine`, but is not wired
-    // to anything reachable from this GUI - see crate-level docs below for
-    // why (no bundled model file). Not calling `build(DeepFilter, ...)`
-    // anywhere is intentional, not an oversight. ---
+    // --- Noise: RNNoise for both paths, each its own independent instance
+    // (no shared state between the mic and speaker paths' stages). ---
     let mic_noise_stage: Box<dyn Stage> =
         noise_engine::build(noise_engine::NoiseEngineKind::RnNoise, None)
             .context("constructing mic-path RNNoise stage")?;
+    let speaker_noise_stage: Box<dyn Stage> =
+        noise_engine::build(noise_engine::NoiseEngineKind::RnNoise, None)
+            .context("constructing speaker-path RNNoise stage")?;
 
     // --- Voice Gate: cheap, real-time volume-based background-voice
     // suppression - see `dsp_core::VoiceGateStage`'s docs. Must run FIRST
@@ -590,6 +744,9 @@ pub fn start(
     let mic_studio_stage: Box<dyn Stage> = Box::new(studio_dsp::StudioStage::new(
         crate::shared::studio_preset_from_index(settings.mic_studio_preset),
     ));
+    let speaker_studio_stage: Box<dyn Stage> = Box::new(studio_dsp::StudioStage::new(
+        crate::shared::studio_preset_from_index(settings.speaker_studio_preset),
+    ));
 
     let mut handles = EngineHandles::new_from_settings(
         settings,
@@ -597,6 +754,8 @@ pub fn start(
         mic_bvc_unavailable_reason,
         speaker_bvc_available,
         speaker_bvc_unavailable_reason,
+        speaker_deep_filter_available,
+        speaker_deep_filter_unavailable_reason,
         Vec::new(),
         tse_available,
         tse_unavailable_reason,
@@ -604,6 +763,8 @@ pub fn start(
         mic_deep_filter_unavailable_reason,
         mic_vanta_available,
         mic_vanta_unavailable_reason,
+        mic_bpo_v1_available,
+        mic_bpo_v1_unavailable_reason,
         target_speaker_store,
         tse_speaker_store.clone(),
         vanta_speaker_store.clone(),
@@ -615,6 +776,7 @@ pub fn start(
     // same "construct inert, then wire the real thing" pattern already used
     // for `device_switcher` below.
     handles.bvc_backend = bvc_backend_selector;
+    handles.speaker_bvc_backend = speaker_bvc_backend_selector;
 
     // --- Ring buffers. 2 seconds of headroom at 48kHz is generous relative
     // to the 10ms frame size; sized once here, never resized (a live device
@@ -741,21 +903,82 @@ pub fn start(
         enrollment_tap,
     )?;
 
-    // --- Pipeline 2 (speaker outbound) is disabled for this session - see
-    // the block above this function's BVC loading. No hardware render is
-    // opened for it, no virtual-speaker-source capture device is opened
-    // (even if one is configured in settings/GUI), and no pipeline thread
-    // is spawned. `virtual_speaker_source_id` is intentionally unused here.
-    let _ = virtual_speaker_source_id;
+    // --- Pipeline 2 (speaker outbound): capture from a second, independent
+    // virtual-cable instance's capture endpoint (what a call app's output
+    // gets redirected into) -> Noise/BVC/Studio -> real physical speakers/
+    // headphones. Independent thread, independent failure mode from
+    // Pipeline 1 - a speaker-pipeline construction failure must not take
+    // down the mic path (see `spawn_speaker_pipeline`'s docs). Unlike the
+    // two virtual-cable ids, `real_speaker_output_id` treats `None` as
+    // "system default output device", not "disabled" - there's always a
+    // sensible real device to render into.
+    let (speaker_capture, speaker_in_p) = match virtual_speaker_source_id {
+        Some(id) => {
+            let (p, c) = make_ring_buffer(2.0);
+            match MicCapture::start_on_device_id(id, p, handles.speaker_counters.clone()) {
+                Ok(capture) => (Some(capture), Some(c)),
+                Err(e) => {
+                    warnings.push(format!(
+                        "Failed to start capture from the selected speaker-source device ({e:#}); \
+                         incoming-call audio cleanup is unavailable until a working device is selected."
+                    ));
+                    (None, None)
+                }
+            }
+        }
+        None => {
+            warnings.push(
+                "No speaker-source device selected - incoming-call audio is not being captured for \
+                 cleanup. Install a second, independent virtual audio cable (e.g. VB-CABLE A+B) and \
+                 select its capture endpoint in the GUI (see docs/VIRTUAL_DEVICES.md)."
+                    .to_string(),
+            );
+            (None, None)
+        }
+    };
+    let (speaker_render, speaker_out_c) = {
+        let (p, c) = make_ring_buffer(2.0);
+        let started = match real_speaker_output_id {
+            Some(id) => HardwareRender::start_on_device_id(id, c, handles.speaker_counters.clone()),
+            None => HardwareRender::start_default(c, handles.speaker_counters.clone()),
+        };
+        match started {
+            Ok(render) => (Some(render), Some(p)),
+            Err(e) => {
+                warnings.push(format!(
+                    "Failed to start the real speaker/headphone output device ({e:#}); incoming-call \
+                     audio cleanup has nowhere to render to."
+                ));
+                (None, None)
+            }
+        }
+    };
+
+    let speaker_in_swap = swap_consumer(speaker_in_p);
+    let speaker_out_swap = swap_producer(speaker_out_c);
+
+    spawn_speaker_pipeline(
+        speaker_in_swap.clone(),
+        speaker_out_swap.clone(),
+        handles.clone(),
+        speaker_noise_stage,
+        speaker_bvc_stage,
+        speaker_studio_stage,
+    )?;
 
     handles.device_switcher = Arc::new(LiveAudioSwitcher {
         physical_mic: Mutex::new(Some(mic_capture)),
         virtual_mic_render: Mutex::new(virtual_mic_render),
         monitor_render: Mutex::new(monitor_render),
+        speaker_capture: Mutex::new(speaker_capture),
+        speaker_render: Mutex::new(speaker_render),
         mic_in_swap,
         mic_out_swap,
         monitor_out_swap,
+        speaker_in_swap,
+        speaker_out_swap,
         counters: handles.counters.clone(),
+        speaker_counters: handles.speaker_counters.clone(),
     });
 
     handles.warnings = std::sync::Arc::new(warnings);
@@ -958,6 +1181,20 @@ fn spawn_mic_pipeline(
                     handles.counters.deadline_misses.fetch_add(1, Ordering::Relaxed);
                 }
 
+                // Master mute: unlike the individual Noise/BVC/Studio
+                // toggles above (which only skip their OWN stage, leaving
+                // the frame passing through untouched when off), this
+                // genuinely silences the frame before it goes anywhere -
+                // real gap this closes: turning every individual stage off
+                // still forwarded raw, unprocessed mic audio, which a user
+                // hit live ("everything is off, I can still hear audio").
+                // Applied after metering (so the level meter still reflects
+                // real mic activity while muted) but before every fan-out
+                // below.
+                if !handles.mic_master_enabled.is_on() {
+                    frame.copy_from_slice(&silence);
+                }
+
                 // Hand a *copy* of the one final processed frame to each
                 // independent downstream path that's actually active. This
                 // is the fan-out `dsp_core`'s SPSC ring buffers can't do on
@@ -995,12 +1232,77 @@ fn spawn_mic_pipeline(
     Ok(())
 }
 
-// Pipeline 2 (speaker outbound: virtual-speaker-source capture -> Noise ->
-// BVC -> Studio -> hardware speaker render) has been removed for this
-// session - see the "disabled for this session" block in `start()`. The mic
-// pipeline (`spawn_mic_pipeline` above) and the read-only hardware-output
-// loopback tap (`LoopbackTap`, used as AEC's reference on the mic path) are
-// untouched.
+/// Pipeline 2: speaker-source capture (a second, independent virtual-cable
+/// instance's capture endpoint) -> Noise -> BVC (Off/Hush/DeepFilterNet
+/// only, see `tse_engine::SpeakerBvcRouterStage`) -> Studio -> real
+/// physical speaker/headphone render. Runs on its own dedicated thread for
+/// the life of the process, entirely independent of `spawn_mic_pipeline` -
+/// a construction failure or a slow/wedged stage here never blocks or takes
+/// down the mic path (each BVC stage is already individually wrapped in its
+/// own `WatchdogStage` before reaching this function, same as the mic
+/// path).
+///
+/// Deliberately simpler than `spawn_mic_pipeline`: no Voice Gate (that
+/// stage's asymmetric-attack/release "who's the loud one" logic was built
+/// for suppressing a quieter background voice behind the MIC's speaker -
+/// same reasoning `docs/TSE_ENROLLMENT.md` gives for excluding TSE/Vanta
+/// here also applies: no natural "who is louder" contrast to key off of for
+/// an arbitrary incoming call), no AutoGain (incoming call audio is
+/// whatever level the remote party/call app already normalized it to - not
+/// this project's mic-input-gain problem to fix), no driver-transport
+/// write, no enrollment tap, and no second "monitor" fan-out (exactly one
+/// render target, the real speaker output).
+fn spawn_speaker_pipeline(
+    speaker_in: SwapConsumer,
+    speaker_out: SwapProducer,
+    handles: EngineHandles,
+    mut noise_stage: Box<dyn Stage>,
+    mut bvc_stage: Box<dyn Stage>,
+    mut studio_stage: Box<dyn Stage>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("clearnai-speaker-pipeline".into())
+        .spawn(move || {
+            let _mmcss_guard = audio_io::mmcss::elevate_current_thread();
+            let mut frame = vec![0.0f32; FRAME_SAMPLES];
+            let silence = vec![0.0f32; FRAME_SAMPLES];
+            let mut last_studio_preset = handles.speaker_studio_preset.load();
+            loop {
+                pull_frame_blocking(&speaker_in, &mut frame, &handles.speaker_counters);
+                let started = Instant::now();
+
+                let current_preset = handles.speaker_studio_preset.load();
+                if current_preset != last_studio_preset {
+                    studio_stage = Box::new(studio_dsp::StudioStage::new(
+                        crate::shared::studio_preset_from_index(current_preset),
+                    ));
+                    last_studio_preset = current_preset;
+                }
+
+                run_if_enabled(noise_stage.as_mut(), &handles.speaker_noise, &mut frame);
+                run_if_enabled(bvc_stage.as_mut(), &handles.speaker_bvc, &mut frame);
+                run_if_enabled(studio_stage.as_mut(), &handles.speaker_studio, &mut frame);
+
+                let elapsed_ns = started.elapsed().as_nanos() as u64;
+                handles.speaker_latency_log.record_ns(elapsed_ns);
+                handles.speaker_counters.frames_processed.fetch_add(1, Ordering::Relaxed);
+                if elapsed_ns > DEADLINE_NS {
+                    handles.speaker_counters.deadline_misses.fetch_add(1, Ordering::Relaxed);
+                }
+
+                // Master mute - see `spawn_mic_pipeline`'s matching comment
+                // for why this exists as a genuine silence, separate from
+                // the individual Noise/BVC/Studio toggles above.
+                if handles.speaker_master_enabled.is_on() {
+                    push_frame(&speaker_out, &frame);
+                } else {
+                    push_frame(&speaker_out, &silence);
+                }
+            }
+        })
+        .context("spawning speaker pipeline thread")?;
+    Ok(())
+}
 
 use crate::shared::PlaybackHandle;
 

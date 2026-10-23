@@ -36,14 +36,44 @@ mod engine;
 fn bootstrap(settings: &settings::Settings) -> gui::Initial {
     let devices = engine::enumerate_devices();
 
-    let mic_target = settings
-        .virtual_mic_target_id
-        .clone()
-        .or_else(|| engine::default_virtual_mic_target(&devices));
-    let speaker_source = settings
-        .virtual_speaker_source_id
-        .clone()
-        .or_else(|| engine::default_virtual_speaker_source(&devices));
+    let mic_target_auto = engine::default_virtual_mic_target(&devices);
+    let speaker_source_auto = engine::default_virtual_speaker_source(&devices);
+    let mic_target_was_auto_detected = settings.virtual_mic_target_id.is_none();
+    let speaker_source_was_auto_detected = settings.virtual_speaker_source_id.is_none();
+    let mic_target = settings.virtual_mic_target_id.clone().or_else(|| mic_target_auto.clone());
+    let speaker_source = settings.virtual_speaker_source_id.clone().or_else(|| speaker_source_auto.clone());
+    // `None` means "system default output device" here, unlike the two
+    // virtual-cable roles above (which need an unambiguous match or stay
+    // unset) - this is the user's real physical speakers/headphones, same
+    // "None = system default" convention as `monitor_device_id`/
+    // `recording_playback_device_id`.
+    let real_speaker_output = settings.real_speaker_output_device_id.clone();
+
+    // Real hazard, not hypothetical: `default_virtual_mic_target`/
+    // `default_virtual_speaker_source`'s own docs flag that with only ONE
+    // VB-Cable pair installed, auto-detection picks its two ends for BOTH
+    // roles - meaning the speaker pipeline would capture the SAME signal
+    // the call app already reads as its own microphone (the mic path's
+    // own output), not real incoming call audio at all. Detected here
+    // structurally (both roles resolved via auto-detection, meaning each
+    // had exactly one unambiguous candidate - i.e. only one cable product
+    // is installed) rather than by fragile device-name pattern matching -
+    // a user who explicitly chose BOTH devices themselves (e.g. a real
+    // VB-CABLE A+B install) never triggers this, since neither came from
+    // auto-detection in that case.
+    let mic_speaker_device_collision_warning =
+        if mic_target_was_auto_detected && speaker_source_was_auto_detected && mic_target_auto.is_some() && speaker_source_auto.is_some() {
+            Some(
+                "Only one virtual audio cable was detected - the mic target and speaker source were \
+                 both auto-selected from it, which means the speaker-outbound path may be capturing \
+                 your OWN outgoing mic signal instead of real incoming call audio. Install a second, \
+                 independent virtual cable (e.g. VB-CABLE A+B) and explicitly select its capture \
+                 endpoint as the speaker source in the GUI."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
 
     // Fast, synchronous checks - both cheap enough to redo on every launch
     // rather than caching/skipping them (see `setup::CompatibilityReport`
@@ -74,12 +104,13 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
         devices.clone(),
         mic_target.as_deref(),
         speaker_source.as_deref(),
+        real_speaker_output.as_deref(),
     ) {
         Ok(outcome) => gui::Initial {
             settings: settings.clone(),
             handles: outcome.handles,
             devices: outcome.devices,
-            extra_warnings: Vec::new(),
+            extra_warnings: mic_speaker_device_collision_warning.into_iter().collect(),
             keepalive: None,
             compat,
             bvc_extraction_error,
@@ -98,7 +129,11 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
                 Some("engine failed to start; see stderr log".to_string()),
                 false,
                 Some("engine failed to start; see stderr log".to_string()),
+                false,
+                Some("engine failed to start; see stderr log".to_string()),
                 vec![format!("Audio engine failed to start: {e:#}")],
+                false,
+                Some("engine failed to start; see stderr log".to_string()),
                 false,
                 Some("engine failed to start; see stderr log".to_string()),
                 false,
@@ -139,7 +174,11 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
         Some("not running on Windows".to_string()),
         false,
         Some("not running on Windows".to_string()),
+        false,
+        Some("not running on Windows".to_string()),
         Vec::new(),
+        false,
+        Some("not running on Windows".to_string()),
         false,
         Some("not running on Windows".to_string()),
         false,

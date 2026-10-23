@@ -127,6 +127,19 @@ pub const SPEAKER_DLL_FILE_NAME: &str = "weya_nc_speaker.dll";
 /// hardware): the DLL correctly recognizes it isn't a valid archive.
 pub const MODEL_BUNDLE_FILE_NAME: &str = "advanced_dfnet16k_model_best_onnx.tar.gz";
 
+/// A real fine-tune of Hush's own upstream checkpoint (pulp-vision/Hush,
+/// `deployment/models/model_best.ckpt`), supplied by the user and exported
+/// in the exact same tar.gz layout as `MODEL_BUNDLE_FILE_NAME` above (same
+/// `enc.onnx`/`erb_dec.onnx`/`df_dec.onnx`/`config.ini` shape, same 16kHz/
+/// hop-160 internal config). This is NOT a different architecture or a
+/// `noise-engine`/`deep_filter` model - it's loaded through the exact same
+/// `weya_nc_model_load_from_path` call as the default bundle, via
+/// `HushBvcStage::try_load_with_model`, so the DLL handles its own internal
+/// 16kHz processing/resampling exactly like it already does for
+/// `MODEL_BUNDLE_FILE_NAME` - nothing in this crate or its callers needs a
+/// separate resampling path for this checkpoint.
+pub const BPO_V1_MODEL_BUNDLE_FILE_NAME: &str = "bpo_v1_onnx.tar.gz";
+
 /// `atten_lim_db` passed to `weya_nc_session_create`. 30.0 dB, matching the
 /// reference Linux port's confirmed default (`BvcConfig::default()` in
 /// `clearnai-bvc/src/registry.rs`, and the `--bvc-atten-lim-db` CLI flag
@@ -259,6 +272,32 @@ impl HushBvcStage {
     /// DLL's source - is at least not accidentally shared just because both
     /// paths happen to load "the same" DLL by name.
     pub fn try_load_named(dll_dir: &Path, dll_file_name: &str) -> Result<Self, HushLoadError> {
+        Self::try_load_with_model(dll_dir, dll_file_name, MODEL_BUNDLE_FILE_NAME)
+    }
+
+    /// Same as `try_load_named`, but loads the model bundle from
+    /// `dll_dir.join(model_bundle_file_name)` instead of the fixed
+    /// `MODEL_BUNDLE_FILE_NAME` - lets a caller select a different
+    /// checkpoint (e.g. `BPO_V1_MODEL_BUNDLE_FILE_NAME`, a real fine-tune of
+    /// Hush's own upstream checkpoint) while reusing the exact same DLL
+    /// symbols and session-creation logic.
+    ///
+    /// Deliberately does NOT require a distinct on-disk DLL path the way
+    /// `try_load_named` recommends for the mic/speaker split: that
+    /// precaution exists because the mic and speaker `HushBvcStage`
+    /// instances run concurrently, on two different threads, every frame -
+    /// any hidden process-global state inside the closed-source DLL could
+    /// genuinely be shared between them. A second checkpoint selected on
+    /// the SAME path (e.g. "Hush" vs. "Hush (bpo_v1)" in the mic-path BVC
+    /// router) never runs concurrently with the default one - the router
+    /// dispatches to exactly one backend per frame on one thread - so
+    /// loading both from the same already-mapped `weya_nc.dll` module is
+    /// safe even though it's technically the same OS-level DLL instance.
+    pub fn try_load_with_model(
+        dll_dir: &Path,
+        dll_file_name: &str,
+        model_bundle_file_name: &str,
+    ) -> Result<Self, HushLoadError> {
         let dll_path = dll_dir.join(dll_file_name);
         if !dll_path.is_file() {
             return Err(HushLoadError::DllNotFound(dll_path));
@@ -303,7 +342,7 @@ impl HushBvcStage {
         //
         // Passed as the still-compressed `.tar.gz` archive itself - see
         // `MODEL_BUNDLE_FILE_NAME`'s docs; the DLL unpacks it internally.
-        let bundle_path = dll_dir.join(MODEL_BUNDLE_FILE_NAME);
+        let bundle_path = dll_dir.join(model_bundle_file_name);
         let model = if bundle_path.is_file() {
             let cpath = path_to_cstring(&bundle_path)?;
             // SAFETY: valid, non-dangling C string; function pointer type

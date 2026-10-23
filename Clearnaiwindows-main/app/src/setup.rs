@@ -53,6 +53,15 @@ const EMBEDDED_DLL_BYTES: &[u8] = include_bytes!("../assets/weya_nc.dll");
 /// `df_dec.onnx`/`config.ini`/`version.txt`.
 const EMBEDDED_MODEL_BYTES: &[u8] = include_bytes!("../assets/advanced_dfnet16k_model_best_onnx.tar.gz");
 
+/// A real fine-tune of Hush's own upstream checkpoint (pulp-vision/Hush,
+/// `deployment/models/model_best.ckpt`), supplied by the user and embedded
+/// from `app/assets/bpo_v1_onnx.tar.gz` - see
+/// `bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME`'s docs. Same tar.gz layout as
+/// `EMBEDDED_MODEL_BYTES` above (loaded via the same
+/// `weya_nc_model_load_from_path` call, just a different on-disk filename),
+/// extracted alongside it - not a replacement.
+const EMBEDDED_BPO_V1_MODEL_BYTES: &[u8] = include_bytes!("../assets/bpo_v1_onnx.tar.gz");
+
 /// The official onnxruntime Windows x64 shared library (v1.19.2, from
 /// Microsoft's own `microsoft/onnxruntime` GitHub Releases), embedded
 /// directly into this binary from `app/assets/onnxruntime.dll` - needed
@@ -228,6 +237,13 @@ pub fn model_bundle_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(bvc_hush::MODEL_BUNDLE_FILE_NAME)
 }
 
+/// Where the `bpo_v1` fine-tune's model bundle lives once extracted - see
+/// `EMBEDDED_BPO_V1_MODEL_BYTES`'s docs. A second, independent file next to
+/// `model_bundle_path`'s, never overwriting it.
+pub fn bpo_v1_model_bundle_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME)
+}
+
 /// Where the DLL lives once extracted: under `app_data_dir()`.
 pub fn dll_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(bvc_hush::DLL_FILE_NAME)
@@ -248,10 +264,13 @@ pub fn onnxruntime_dll_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(bvc_vanta::ecapa::DLL_FILE_NAME)
 }
 
-/// True only if the real bundle file exists, is non-empty, and its size
+/// True only if the real bundle file exists and its content exactly
 /// matches the embedded bytes - i.e. `ensure_bvc_assets_extracted` has
 /// already run successfully against this directory. A zero-byte, partial,
-/// or stale-sized file counts as NOT present so extraction is retried.
+/// or stale/mismatched file counts as NOT present so extraction is
+/// retried. Compares full content, not just size - see
+/// `extract_one_if_needed`'s docs for why a size-only check isn't safe
+/// here.
 ///
 /// Not called from `main.rs` any more (extraction now runs unconditionally
 /// and reports its own `Result` - see `ensure_bvc_assets_extracted`), but
@@ -259,10 +278,9 @@ pub fn onnxruntime_dll_path(app_data_dir: &Path) -> PathBuf {
 /// module's existing habit of keeping honest presence-checks around.
 #[allow(dead_code)]
 pub fn model_bundle_present(app_data_dir: &Path) -> bool {
-    match std::fs::metadata(model_bundle_path(app_data_dir)) {
-        Ok(meta) => meta.is_file() && meta.len() == EMBEDDED_MODEL_BYTES.len() as u64,
-        Err(_) => false,
-    }
+    std::fs::read(model_bundle_path(app_data_dir))
+        .map(|existing| existing == EMBEDDED_MODEL_BYTES)
+        .unwrap_or(false)
 }
 
 /// Whether a single embedded asset needed to be (re)written, returned per
@@ -280,7 +298,7 @@ pub enum AssetState {
 }
 
 /// Result of `ensure_bvc_assets_extracted`: what happened to each of the
-/// two embedded files.
+/// embedded files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractionOutcome {
     pub dll: AssetState,
@@ -288,6 +306,10 @@ pub struct ExtractionOutcome {
     /// `speaker_dll_path`.
     pub speaker_dll: AssetState,
     pub model: AssetState,
+    /// The `bpo_v1` fine-tune's model bundle - see
+    /// `bpo_v1_model_bundle_path`. Independent of `model` above; never
+    /// overwrites or is overwritten by it.
+    pub bpo_v1_model: AssetState,
     /// `onnxruntime.dll` - see `onnxruntime_dll_path`.
     pub onnxruntime_dll: AssetState,
 }
@@ -301,6 +323,7 @@ impl ExtractionOutcome {
         self.dll == AssetState::Extracted
             || self.speaker_dll == AssetState::Extracted
             || self.model == AssetState::Extracted
+            || self.bpo_v1_model == AssetState::Extracted
             || self.onnxruntime_dll == AssetState::Extracted
     }
 }
@@ -339,14 +362,26 @@ fn write_atomically(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     result
 }
 
-/// Writes `bytes` to `path` only if it doesn't already exist there with a
-/// matching size - a cheap, good-enough staleness check that avoids
-/// rewriting ~14MB/~8.5MB of already-correct data on every single launch,
-/// without needing a full content hash (the bytes are, after all, embedded
-/// in this very binary and never change between launches of the same
-/// build).
+/// Writes `bytes` to `path` only if it doesn't already exist there with
+/// byte-identical content - avoids rewriting several MB of already-correct
+/// data on every single launch.
+///
+/// Compares full contents, not just file size. An earlier revision of this
+/// function compared size only, on the reasoning that the embedded bytes
+/// never change between launches of the same build - true, but it silently
+/// breaks across *different* builds whose embedded asset happens to be the
+/// exact same byte length (not a hypothetical: the real
+/// `advanced_dfnet16k_model_best_onnx.tar.gz` and `bpo_v1_onnx.tar.gz`
+/// bundles this app ships differ by only a few hundred bytes out of ~8.5MB,
+/// a near-miss that a less similar pair of models could easily land on
+/// exactly). A size-only check in that case would see "right length,
+/// extracted already" on an update that actually changed the model's
+/// content and leave the stale, wrong file in place indefinitely, with no
+/// error or warning. Reading the existing file back costs a few
+/// milliseconds for assets this size; paid once per launch, that's a
+/// correct trade against "silently serves a stale model forever."
 fn extract_one_if_needed(path: &Path, bytes: &[u8]) -> anyhow::Result<AssetState> {
-    let already_correct = std::fs::metadata(path).map(|m| m.is_file() && m.len() == bytes.len() as u64).unwrap_or(false);
+    let already_correct = std::fs::read(path).map(|existing| existing == bytes).unwrap_or(false);
     if already_correct {
         return Ok(AssetState::AlreadyPresent);
     }
@@ -386,9 +421,13 @@ pub fn ensure_bvc_assets_extracted(target_dir: &Path) -> anyhow::Result<Extracti
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::SPEAKER_DLL_FILE_NAME))?;
     let model = extract_one_if_needed(&model_bundle_path(target_dir), EMBEDDED_MODEL_BYTES)
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::MODEL_BUNDLE_FILE_NAME))?;
+    // The user-supplied bpo_v1 fine-tune - a separate file, never
+    // overwriting `model` above.
+    let bpo_v1_model = extract_one_if_needed(&bpo_v1_model_bundle_path(target_dir), EMBEDDED_BPO_V1_MODEL_BYTES)
+        .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME))?;
     let onnxruntime_dll = extract_one_if_needed(&onnxruntime_dll_path(target_dir), EMBEDDED_ONNXRUNTIME_DLL_BYTES)
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_vanta::ecapa::DLL_FILE_NAME))?;
-    Ok(ExtractionOutcome { dll, speaker_dll, model, onnxruntime_dll })
+    Ok(ExtractionOutcome { dll, speaker_dll, model, bpo_v1_model, onnxruntime_dll })
 }
 
 #[cfg(test)]
@@ -441,6 +480,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Regression test for the exact bug `extract_one_if_needed`'s docs
+    /// describe: a stale on-disk file that happens to match the embedded
+    /// asset's SIZE but not its CONTENT must still be detected as stale and
+    /// rewritten - a size-only check would wrongly call this
+    /// `AlreadyPresent` and leave the wrong bytes in place forever.
+    #[test]
+    fn extract_one_if_needed_rewrites_a_same_size_but_wrong_content_file() {
+        let dir = std::env::temp_dir().join(format!("clearnai_setup_test_same_size_wrong_content_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("asset.bin");
+
+        let real_bytes = b"the real, correct embedded content";
+        // Same length as `real_bytes`, every byte different.
+        let stale_bytes: Vec<u8> = real_bytes.iter().map(|b| b.wrapping_add(1)).collect();
+        assert_eq!(stale_bytes.len(), real_bytes.len(), "test setup: must be a genuine same-size mismatch");
+        std::fs::write(&path, &stale_bytes).unwrap();
+
+        let state = extract_one_if_needed(&path, real_bytes).expect("extraction must succeed");
+        assert_eq!(
+            state,
+            AssetState::Extracted,
+            "a same-size-but-different-content file must be treated as stale and rewritten, not AlreadyPresent"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), real_bytes, "the stale content must actually have been replaced");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn model_bundle_present_after_real_extraction() {
         let dir = std::env::temp_dir().join(format!("clearnai_setup_test_present_{}", std::process::id()));
@@ -451,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_bvc_assets_extracted_writes_files_matching_embedded_byte_lengths() {
+    fn ensure_bvc_assets_extracted_writes_files_matching_embedded_bytes() {
         let dir = std::env::temp_dir().join(format!("clearnai_setup_test_extract_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -459,17 +526,18 @@ mod tests {
         assert_eq!(outcome.dll, AssetState::Extracted);
         assert_eq!(outcome.speaker_dll, AssetState::Extracted);
         assert_eq!(outcome.model, AssetState::Extracted);
+        assert_eq!(outcome.bpo_v1_model, AssetState::Extracted);
         assert_eq!(outcome.onnxruntime_dll, AssetState::Extracted);
         assert!(outcome.wrote_anything());
 
-        let dll_meta = std::fs::metadata(dll_path(&dir)).unwrap();
-        assert_eq!(dll_meta.len(), EMBEDDED_DLL_BYTES.len() as u64);
-        let speaker_dll_meta = std::fs::metadata(speaker_dll_path(&dir)).unwrap();
-        assert_eq!(speaker_dll_meta.len(), EMBEDDED_DLL_BYTES.len() as u64);
-        let model_meta = std::fs::metadata(model_bundle_path(&dir)).unwrap();
-        assert_eq!(model_meta.len(), EMBEDDED_MODEL_BYTES.len() as u64);
-        let onnxruntime_meta = std::fs::metadata(onnxruntime_dll_path(&dir)).unwrap();
-        assert_eq!(onnxruntime_meta.len(), EMBEDDED_ONNXRUNTIME_DLL_BYTES.len() as u64);
+        // Full content match, not just size - proves `extract_one_if_needed`
+        // actually wrote the real embedded bytes, not merely a
+        // correctly-sized file.
+        assert_eq!(std::fs::read(dll_path(&dir)).unwrap(), EMBEDDED_DLL_BYTES);
+        assert_eq!(std::fs::read(speaker_dll_path(&dir)).unwrap(), EMBEDDED_DLL_BYTES);
+        assert_eq!(std::fs::read(model_bundle_path(&dir)).unwrap(), EMBEDDED_MODEL_BYTES);
+        assert_eq!(std::fs::read(bpo_v1_model_bundle_path(&dir)).unwrap(), EMBEDDED_BPO_V1_MODEL_BYTES);
+        assert_eq!(std::fs::read(onnxruntime_dll_path(&dir)).unwrap(), EMBEDDED_ONNXRUNTIME_DLL_BYTES);
 
         // No leftover `.part` files after a successful extraction.
         assert!(!dll_path(&dir).with_extension("dll.part").exists());
@@ -486,13 +554,15 @@ mod tests {
         assert_eq!(first.dll, AssetState::Extracted);
         assert_eq!(first.speaker_dll, AssetState::Extracted);
         assert_eq!(first.model, AssetState::Extracted);
+        assert_eq!(first.bpo_v1_model, AssetState::Extracted);
         assert_eq!(first.onnxruntime_dll, AssetState::Extracted);
 
         let second = ensure_bvc_assets_extracted(&dir).expect("second extraction must succeed");
-        assert_eq!(second.dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
-        assert_eq!(second.speaker_dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
-        assert_eq!(second.model, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
-        assert_eq!(second.onnxruntime_dll, AssetState::AlreadyPresent, "a correctly-sized file must not be rewritten");
+        assert_eq!(second.dll, AssetState::AlreadyPresent, "a byte-identical file must not be rewritten");
+        assert_eq!(second.speaker_dll, AssetState::AlreadyPresent, "a byte-identical file must not be rewritten");
+        assert_eq!(second.model, AssetState::AlreadyPresent, "a byte-identical file must not be rewritten");
+        assert_eq!(second.bpo_v1_model, AssetState::AlreadyPresent, "a byte-identical file must not be rewritten");
+        assert_eq!(second.onnxruntime_dll, AssetState::AlreadyPresent, "a byte-identical file must not be rewritten");
         assert!(!second.wrote_anything());
 
         std::fs::remove_dir_all(&dir).ok();

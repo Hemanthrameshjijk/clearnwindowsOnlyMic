@@ -44,11 +44,32 @@ pub enum BvcBackend {
     /// no-op, exactly like Hush/DeepFilter/Tse do, if construction ever
     /// fails (e.g. `onnxruntime.dll` missing for the ECAPA encoder).
     Vanta,
+    /// Hush's own architecture (`weya_nc.dll`), but loaded with a different
+    /// checkpoint: `bpo_v1`, a fine-tune of Hush's own upstream checkpoint
+    /// (pulp-vision/Hush, `deployment/models/model_best.ckpt`), exported in
+    /// the exact same `enc.onnx`/`erb_dec.onnx`/`df_dec.onnx`/`config.ini`
+    /// tar.gz layout as the bundled
+    /// `advanced_dfnet16k_model_best_onnx.tar.gz`. This is NOT a separate
+    /// architecture or a `noise_engine`/`deep_filter` model - the DLL loads
+    /// this archive itself via `weya_nc_model_load_from_path`
+    /// (`bvc_hush::HushBvcStage::try_load_with_model`), handling its own
+    /// internal 16kHz processing and resampling exactly like the default
+    /// Hush model does; nothing in `app`/`tse-engine` needs to know or care
+    /// that this checkpoint's native rate differs from the pipeline's
+    /// 48kHz. Added alongside, never replacing, the default `Hush` option -
+    /// both remain independently selectable, each its own `HushBvcStage`.
+    HushBpoV1,
 }
 
 impl BvcBackend {
-    pub const ALL: [BvcBackend; 5] =
-        [BvcBackend::Off, BvcBackend::Hush, BvcBackend::DeepFilter, BvcBackend::Tse, BvcBackend::Vanta];
+    pub const ALL: [BvcBackend; 6] = [
+        BvcBackend::Off,
+        BvcBackend::Hush,
+        BvcBackend::DeepFilter,
+        BvcBackend::Tse,
+        BvcBackend::Vanta,
+        BvcBackend::HushBpoV1,
+    ];
 
     pub const fn to_index(self) -> u8 {
         match self {
@@ -57,6 +78,7 @@ impl BvcBackend {
             BvcBackend::Tse => 2,
             BvcBackend::DeepFilter => 3,
             BvcBackend::Vanta => 4,
+            BvcBackend::HushBpoV1 => 5,
         }
     }
 
@@ -66,6 +88,7 @@ impl BvcBackend {
             2 => BvcBackend::Tse,
             3 => BvcBackend::DeepFilter,
             4 => BvcBackend::Vanta,
+            5 => BvcBackend::HushBpoV1,
             // Anything else (including the expected 0) degrades to Off,
             // matching `studio_preset_from_index`'s "unrecognized index
             // falls back to a safe default rather than panicking" rule -
@@ -81,6 +104,7 @@ impl BvcBackend {
             BvcBackend::DeepFilter => "DeepFilterNet",
             BvcBackend::Tse => "Target Speaker (TSE)",
             BvcBackend::Vanta => "Vanta (experimental)",
+            BvcBackend::HushBpoV1 => "Hush (bpo_v1)",
         }
     }
 }
@@ -100,11 +124,14 @@ pub struct BvcRouterStage {
     /// Always a `NoOpStage` in practice today - see `BvcBackend::Vanta`'s
     /// docs on why this must never run real (untrained) inference.
     vanta: Box<dyn Stage>,
+    /// See `BvcBackend::HushBpoV1`'s docs - the user-supplied fine-tune,
+    /// independent of (and never replacing) `deep_filter` above.
+    hush_bpo_v1: Box<dyn Stage>,
 }
 
 impl BvcRouterStage {
-    /// `hush`, `deep_filter`, `tse`, and `vanta` are expected to already be
-    /// wrapped in whatever isolation each backend needs (e.g.
+    /// `hush`, `deep_filter`, `tse`, `vanta`, and `hush_bpo_v1` are expected to
+    /// already be wrapped in whatever isolation each backend needs (e.g.
     /// `dsp_core::WatchdogStage` with a timeout appropriate to that backend
     /// - 500ms for Hush's closed-source DLL call, a much tighter bound for
     /// TSE - see `crate::adapter`'s docs). This type only handles *which*
@@ -124,6 +151,7 @@ impl BvcRouterStage {
         deep_filter: Box<dyn Stage>,
         tse: Box<dyn Stage>,
         vanta: Box<dyn Stage>,
+        hush_bpo_v1: Box<dyn Stage>,
     ) -> Self {
         Self {
             backend: selector,
@@ -131,13 +159,14 @@ impl BvcRouterStage {
             deep_filter,
             tse,
             vanta,
+            hush_bpo_v1,
         }
     }
 }
 
 impl Stage for BvcRouterStage {
     fn name(&self) -> &'static str {
-        "BVC (Off/Hush/DeepFilterNet/TSE/Vanta router)"
+        "BVC (Off/Hush/DeepFilterNet/TSE/Vanta/Hush-bpo_v1 router)"
     }
 
     fn process(&mut self, frame: &mut [f32]) {
@@ -147,6 +176,7 @@ impl Stage for BvcRouterStage {
             BvcBackend::DeepFilter => self.deep_filter.process(frame),
             BvcBackend::Tse => self.tse.process(frame),
             BvcBackend::Vanta => self.vanta.process(frame),
+            BvcBackend::HushBpoV1 => self.hush_bpo_v1.process(frame),
         }
     }
 }
@@ -203,6 +233,18 @@ mod tests {
         }
     }
 
+    struct AddMillion;
+    impl Stage for AddMillion {
+        fn name(&self) -> &'static str {
+            "add-million"
+        }
+        fn process(&mut self, frame: &mut [f32]) {
+            for s in frame.iter_mut() {
+                *s += 1_000_000.0;
+            }
+        }
+    }
+
     #[test]
     fn backend_index_round_trips() {
         for backend in BvcBackend::ALL {
@@ -224,6 +266,7 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [1.0f32, 2.0];
         router.process(&mut frame);
@@ -239,6 +282,7 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [1.0f32];
         router.process(&mut frame);
@@ -254,6 +298,7 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [1.0f32];
         router.process(&mut frame);
@@ -269,6 +314,7 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [1.0f32];
         router.process(&mut frame);
@@ -284,10 +330,27 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [1.0f32];
         router.process(&mut frame);
         assert_eq!(frame, [1001.0]);
+    }
+
+    #[test]
+    fn bpo_v1_runs_the_bpo_v1_stage_only() {
+        let selector = SharedPreset::new(BvcBackend::HushBpoV1.to_index());
+        let mut router = BvcRouterStage::new(
+            selector,
+            Box::new(AddOne),
+            Box::new(AddHundred),
+            Box::new(AddTen),
+            Box::new(AddThousand),
+            Box::new(AddMillion),
+        );
+        let mut frame = [1.0f32];
+        router.process(&mut frame);
+        assert_eq!(frame, [1_000_001.0]);
     }
 
     #[test]
@@ -299,6 +362,7 @@ mod tests {
             Box::new(AddHundred),
             Box::new(AddTen),
             Box::new(AddThousand),
+            Box::new(AddMillion),
         );
         let mut frame = [0.0f32];
         router.process(&mut frame);
@@ -319,5 +383,9 @@ mod tests {
         selector.store(BvcBackend::Vanta.to_index());
         router.process(&mut frame);
         assert_eq!(frame, [1111.0]);
+
+        selector.store(BvcBackend::HushBpoV1.to_index());
+        router.process(&mut frame);
+        assert_eq!(frame, [1_001_111.0]);
     }
 }

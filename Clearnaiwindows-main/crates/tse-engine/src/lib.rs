@@ -12,7 +12,9 @@
 mod adapter;
 mod backend;
 mod router;
+mod speaker_router;
 
 pub use adapter::{TseMetrics, TseStageAdapter};
 pub use backend::{TseBackend, TseError, UnavailableTse};
 pub use router::{BvcBackend, BvcRouterStage};
+pub use speaker_router::{SpeakerBvcBackend, SpeakerBvcRouterStage};

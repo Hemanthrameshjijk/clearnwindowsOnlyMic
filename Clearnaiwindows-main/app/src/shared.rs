@@ -429,14 +429,15 @@ impl Stage for NoOpStage {
 pub trait LiveDeviceSwitcher: Send + Sync {
     fn set_physical_mic(&self, device_id: Option<String>);
     fn set_virtual_mic_target(&self, device_id: Option<String>);
-    /// Speaker-outbound (Pipeline 2) has been removed from the GUI and the
-    /// real engine for this session (see `engine.rs`) - no caller invokes
-    /// this any more, but the method is kept on the trait (rather than
-    /// deleted) so re-enabling that pipeline later doesn't require touching
-    /// this trait's shape again. `#[allow(dead_code)]` is the honest way to
-    /// say "unused right now, not a mistake."
-    #[allow(dead_code)]
+    /// The speaker-outbound path's capture source - a second, independent
+    /// virtual-cable instance's capture endpoint (what a call app's output
+    /// gets redirected into, instead of real speakers) - see
+    /// `spawn_speaker_pipeline`'s docs for the full topology.
     fn set_virtual_speaker_source(&self, device_id: Option<String>);
+    /// The speaker-outbound path's render target - the user's real physical
+    /// speakers/headphones, where the cleaned incoming-call audio actually
+    /// ends up.
+    fn set_real_speaker_output(&self, device_id: Option<String>);
     fn set_monitor_device(&self, device_id: Option<String>);
 
     /// Re-enumerates render/capture devices right now. Real hardware
@@ -460,6 +461,7 @@ impl LiveDeviceSwitcher for NoOpDeviceSwitcher {
     fn set_physical_mic(&self, _device_id: Option<String>) {}
     fn set_virtual_mic_target(&self, _device_id: Option<String>) {}
     fn set_virtual_speaker_source(&self, _device_id: Option<String>) {}
+    fn set_real_speaker_output(&self, _device_id: Option<String>) {}
     fn set_monitor_device(&self, _device_id: Option<String>) {}
 
     fn enumerate_devices(&self) -> DeviceList {
@@ -490,19 +492,29 @@ pub struct EngineHandles {
     /// mic pipeline loop for the once-per-frame load + swap-on-change
     /// pattern.
     pub mic_studio_preset: SharedPreset,
-    /// Speaker outbound path (Pipeline 2), removed from the GUI and the real
-    /// engine for this session - see `engine.rs`. Kept on this struct
-    /// (rather than deleted) so re-enabling that pipeline later doesn't
-    /// require reshaping `EngineHandles` again; nothing reads these four
-    /// fields right now, which is expected, not a bug.
-    #[allow(dead_code)]
+    /// Speaker-outbound path (Pipeline 2) - real, wired by `engine::start`'s
+    /// `spawn_speaker_pipeline`. RNNoise for incoming-call audio, "Speaker
+    /// Noise".
     pub speaker_noise: StageToggle,
-    #[allow(dead_code)]
+    /// Speaker-path BVC, "Speaker BVC (after Noise)" - see
+    /// `speaker_bvc_available`.
     pub speaker_bvc: StageToggle,
-    #[allow(dead_code)]
     pub speaker_studio: StageToggle,
-    #[allow(dead_code)]
     pub speaker_studio_preset: SharedPreset,
+
+    /// Master mute for the WHOLE mic pipeline - unlike `mic_noise`/
+    /// `mic_bvc`/`mic_studio` (which only gate whether their OWN stage's
+    /// `.process()` runs, leaving the frame passing through untouched when
+    /// off), this replaces the final frame with real silence before it's
+    /// forwarded anywhere. Turning off every individual stage toggle still
+    /// forwards raw, unprocessed audio - a real, confusing gap a user
+    /// hit live ("everything is off, I can still hear audio") - this is
+    /// the genuine "stop this pipeline" switch that gap needed. Defaults
+    /// to enabled (`true`) and is NOT persisted - a runtime-only mute,
+    /// always starting fresh/on at each launch.
+    pub mic_master_enabled: StageToggle,
+    /// Same as `mic_master_enabled`, for the speaker-outbound pipeline.
+    pub speaker_master_enabled: StageToggle,
 
     /// "Monitor (hear processed mic locally)" - a diagnostic/testing-only
     /// path, wholly independent of the virtual-mic-target pipeline. When on
@@ -526,16 +538,20 @@ pub struct EngineHandles {
     /// not found next to ..."), for a tooltip/label next to the disabled
     /// toggle. `None` when `mic_bvc_available` is `true`.
     pub mic_bvc_unavailable_reason: Option<String>,
-    /// Whether the speaker-path `bvc_hush::HushBvcStage::try_load` succeeded
-    /// at startup. See `mic_bvc_available` - this is its own independent
-    /// flag, not shared with the mic path. Unread now that Pipeline 2 is
-    /// removed from the GUI/engine - see `speaker_noise`'s docs.
-    #[allow(dead_code)]
+    /// Whether the speaker-path Hush instance loaded successfully. See
+    /// `mic_bvc_available` - its own independent flag, not shared with the
+    /// mic path (a second, independent DLL session - see `bvc_hush`'s
+    /// `speaker_dll_path`/`SPEAKER_DLL_FILE_NAME`).
     pub speaker_bvc_available: bool,
-    /// Human-readable reason speaker-path BVC is unavailable. `None` when
+    /// Human-readable reason speaker-path Hush is unavailable. `None` when
     /// `speaker_bvc_available` is `true`.
-    #[allow(dead_code)]
     pub speaker_bvc_unavailable_reason: Option<String>,
+    /// Whether the speaker-path DeepFilterNet instance loaded successfully -
+    /// its own independent instance from the mic path's (see
+    /// `noise_engine::load_bundled_deep_filter`).
+    pub speaker_deep_filter_available: bool,
+    /// Human-readable reason speaker-path DeepFilterNet is unavailable.
+    pub speaker_deep_filter_unavailable_reason: Option<String>,
 
     /// Non-fatal startup warnings (e.g. "no virtual speaker source device
     /// selected; speaker outbound pipeline not started") surfaced once in
@@ -549,6 +565,11 @@ pub struct EngineHandles {
     /// existing "always a real, just possibly unread, handle" rule (see
     /// `device_switcher`'s docs).
     pub bvc_backend: SharedPreset,
+    /// Live BVC backend selector for the speaker-outbound path - Off/Hush/
+    /// DeepFilterNet only (see `tse_engine::SpeakerBvcBackend`), never TSE/
+    /// Vanta - there's no way to enroll an arbitrary incoming caller's voice
+    /// ahead of time, so target-speaker extraction doesn't apply here.
+    pub speaker_bvc_backend: SharedPreset,
     /// Whether a real TSE backend is available. Always `false` today - see
     /// `tse_engine::UnavailableTse`'s docs on why no real streaming
     /// target-speaker-extraction model is integrated yet. Kept as an
@@ -579,6 +600,15 @@ pub struct EngineHandles {
     pub mic_vanta_available: bool,
     /// Mirrors `mic_bvc_unavailable_reason`.
     pub mic_vanta_unavailable_reason: Option<String>,
+    /// Whether `bvc_hush::HushBvcStage::try_load_with_model` succeeded at
+    /// startup for the `bpo_v1` checkpoint - see
+    /// `tse_engine::BvcBackend::HushBpoV1`'s docs. A real fine-tune of
+    /// Hush's own upstream checkpoint, added alongside (never replacing)
+    /// the default `Hush` option - its own independent `HushBvcStage`
+    /// instance and its own independent availability flag.
+    pub mic_bpo_v1_available: bool,
+    /// Mirrors `mic_bvc_unavailable_reason`.
+    pub mic_bpo_v1_unavailable_reason: Option<String>,
     /// The enrolled target speaker (or none), read by the realtime TSE
     /// stage via `tse_engine::TseStageAdapter` and written by
     /// `enrollment`'s worker thread - never touched directly by the GUI or
@@ -611,6 +641,14 @@ pub struct EngineHandles {
     /// not a bug.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub counters: Arc<FrameCounters>,
+    /// Speaker-outbound path's OWN, independent latency/drop telemetry -
+    /// deliberately NOT shared with `latency_log`/`counters` above, so the
+    /// GUI can show each pipeline's realtime status separately rather than
+    /// one merged number that can't tell you which direction is unhealthy.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub speaker_latency_log: Arc<LatencyLog>,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub speaker_counters: Arc<FrameCounters>,
     pub level: Arc<LevelMeter>,
 
     /// Live device-switching handle for the four device pickers - see
@@ -635,6 +673,8 @@ impl EngineHandles {
         mic_bvc_unavailable_reason: Option<String>,
         speaker_bvc_available: bool,
         speaker_bvc_unavailable_reason: Option<String>,
+        speaker_deep_filter_available: bool,
+        speaker_deep_filter_unavailable_reason: Option<String>,
         warnings: Vec<String>,
         tse_available: bool,
         tse_unavailable_reason: Option<String>,
@@ -642,6 +682,8 @@ impl EngineHandles {
         mic_deep_filter_unavailable_reason: Option<String>,
         mic_vanta_available: bool,
         mic_vanta_unavailable_reason: Option<String>,
+        mic_bpo_v1_available: bool,
+        mic_bpo_v1_unavailable_reason: Option<String>,
         target_speaker_store: TargetSpeakerStore,
         tse_speaker_store: TargetSpeakerStore,
         vanta_speaker_store: TargetSpeakerStore,
@@ -654,21 +696,28 @@ impl EngineHandles {
             mic_studio: StageToggle::new(settings.mic_studio_on),
             mic_studio_preset: SharedPreset::new(settings.mic_studio_preset),
             speaker_noise: StageToggle::new(settings.speaker_noise_on),
-            speaker_bvc: StageToggle::new(settings.speaker_bvc_on && speaker_bvc_available),
+            speaker_bvc: StageToggle::new(settings.speaker_bvc_on && (speaker_bvc_available || speaker_deep_filter_available)),
             speaker_studio: StageToggle::new(settings.speaker_studio_on),
             speaker_studio_preset: SharedPreset::new(settings.speaker_studio_preset),
+            mic_master_enabled: StageToggle::new(true),
+            speaker_master_enabled: StageToggle::new(true),
             monitor: StageToggle::new(settings.monitor_enabled),
             mic_bvc_available,
             mic_bvc_unavailable_reason,
             speaker_bvc_available,
             speaker_bvc_unavailable_reason,
+            speaker_deep_filter_available,
+            speaker_deep_filter_unavailable_reason,
             bvc_backend: SharedPreset::new(settings.mic_bvc_backend),
+            speaker_bvc_backend: SharedPreset::new(settings.speaker_bvc_backend),
             tse_available,
             tse_unavailable_reason,
             mic_deep_filter_available,
             mic_deep_filter_unavailable_reason,
             mic_vanta_available,
             mic_vanta_unavailable_reason,
+            mic_bpo_v1_available,
+            mic_bpo_v1_unavailable_reason,
             target_speaker_store,
             tse_speaker_store,
             vanta_speaker_store,
@@ -677,6 +726,8 @@ impl EngineHandles {
             warnings: Arc::new(warnings),
             latency_log: Arc::new(LatencyLog::new(1024)),
             counters: Arc::new(FrameCounters::default()),
+            speaker_latency_log: Arc::new(LatencyLog::new(1024)),
+            speaker_counters: Arc::new(FrameCounters::default()),
             level: Arc::new(LevelMeter::new()),
             device_switcher: Arc::new(NoOpDeviceSwitcher),
         }
@@ -736,6 +787,14 @@ mod tests {
             mic_bvc_unavailable_reason,
             speaker_bvc_available,
             speaker_bvc_unavailable_reason,
+            // DeepFilterNet availability isn't this helper's concern - keep
+            // it unavailable so `speaker_bvc_available`'s effect on the
+            // combined `speaker_bvc` toggle (see `new_from_settings`'s
+            // `speaker_bvc_available || speaker_deep_filter_available`) is
+            // exactly what each test below explicitly passes, not silently
+            // overridden by a hardcoded `true`.
+            false,
+            None,
             warnings,
             false,
             Some("no TSE model bundled".to_string()),
@@ -743,6 +802,10 @@ mod tests {
             None,
             false,
             Some("no Vanta model bundled".to_string()),
+            // bpo_v1 availability isn't this helper's concern either - kept
+            // unavailable for the same reason as DeepFilterNet/Vanta above.
+            false,
+            Some("no bpo_v1 model bundled".to_string()),
             store,
             tse_store,
             vanta_store,
@@ -873,6 +936,8 @@ mod tests {
             None,
             true,
             None,
+            true,
+            None,
             Vec::new(),
             false,
             Some("no TSE model bundled".to_string()),
@@ -880,6 +945,8 @@ mod tests {
             None,
             false,
             Some("no Vanta model bundled".to_string()),
+            false,
+            Some("no bpo_v1 model bundled".to_string()),
             store,
             tse_store,
             vanta_store,

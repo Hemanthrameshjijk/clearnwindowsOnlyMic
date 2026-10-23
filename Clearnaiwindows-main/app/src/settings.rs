@@ -112,6 +112,25 @@ pub struct Settings {
     /// plumbing is needed for it.
     #[serde(default)]
     pub recording_playback_device_id: Option<String>,
+    /// WASAPI render-device id the speaker-outbound path renders the
+    /// cleaned incoming-call audio into - the user's actual physical
+    /// speakers/headphones. `None` means the system default output device.
+    /// Distinct from `monitor_device_id` (a diagnostic A/B path for the MIC
+    /// signal) - this is the real, continuously-running speaker-path output.
+    #[serde(default)]
+    pub real_speaker_output_device_id: Option<String>,
+    /// Which BVC backend is selected for the speaker-outbound path -
+    /// Off/Hush/DeepFilterNet only (see `tse_engine::SpeakerBvcBackend`).
+    /// Deliberately NOT the same (now 6-option) enum as `mic_bvc_backend`:
+    /// target-speaker extraction (TSE/Vanta) needs an enrolled voice to
+    /// preserve, and there's no way to enroll an arbitrary incoming caller
+    /// ahead of time, so those options don't exist on this path at all.
+    /// `Hush (bpo_v1)` (see `tse_engine::BvcBackend::HushBpoV1`) is mic-path
+    /// only for now - no speaker-path instance of this checkpoint exists
+    /// yet (one could be added the same way the speaker path's own Hush
+    /// instance already exists, if ever needed).
+    #[serde(default = "default_speaker_bvc_backend")]
+    pub speaker_bvc_backend: u8,
     /// Which BVC backend is selected for the mic path - Off/Hush/TSE (see
     /// `tse_engine::BvcBackend`), encoded the same "plain `u8` index"
     /// way `mic_studio_preset` already is. Default `1` (Hush), matching
@@ -154,6 +173,10 @@ fn default_bvc_backend() -> u8 {
     tse_engine::BvcBackend::Hush.to_index()
 }
 
+fn default_speaker_bvc_backend() -> u8 {
+    tse_engine::SpeakerBvcBackend::Hush.to_index()
+}
+
 fn default_reference_sentence() -> String {
     enrollment::DEFAULT_REFERENCE_SENTENCE.to_string()
 }
@@ -178,6 +201,8 @@ impl Default for Settings {
             monitor_enabled: false,
             monitor_device_id: None,
             recording_playback_device_id: None,
+            real_speaker_output_device_id: None,
+            speaker_bvc_backend: default_speaker_bvc_backend(),
             mic_bvc_backend: default_bvc_backend(),
             reference_sentence: default_reference_sentence(),
             setup_acknowledged: false,
@@ -269,6 +294,12 @@ mod tests {
             tse_engine::BvcBackend::Hush.to_index(),
             "BVC backend defaults to Hush, matching this project's previous (pre-TSE) behavior"
         );
+        assert!(s.real_speaker_output_device_id.is_none(), "real speaker output defaults to auto/default");
+        assert_eq!(
+            s.speaker_bvc_backend,
+            tse_engine::SpeakerBvcBackend::Hush.to_index(),
+            "speaker BVC backend defaults to Hush, same as the mic path"
+        );
         assert_eq!(s.reference_sentence, enrollment::DEFAULT_REFERENCE_SENTENCE);
         assert!(!s.setup_acknowledged, "setup screen must not be pre-acknowledged by default");
     }
@@ -298,6 +329,35 @@ mod tests {
         let mut s = Settings::default();
         s.mic_bvc_backend = tse_engine::BvcBackend::Tse.to_index();
         s.reference_sentence = "A custom sentence.".to_string();
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: Settings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn settings_json_from_before_speaker_bvc_fields_existed_still_loads() {
+        // Simulates a real settings.json written before this task added
+        // `real_speaker_output_device_id`/`speaker_bvc_backend` - must still
+        // deserialize via `#[serde(default)]`.
+        let json = r#"{
+            "mic_noise_on": true,
+            "mic_bvc_on": true,
+            "mic_studio_on": true,
+            "aec_on": false,
+            "speaker_tap_on": true,
+            "virtual_mic_target_id": null,
+            "virtual_speaker_source_id": null
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("old-format settings.json must still parse");
+        assert!(s.real_speaker_output_device_id.is_none());
+        assert_eq!(s.speaker_bvc_backend, tse_engine::SpeakerBvcBackend::Hush.to_index());
+    }
+
+    #[test]
+    fn round_trips_real_speaker_output_and_speaker_bvc_backend_through_json() {
+        let mut s = Settings::default();
+        s.real_speaker_output_device_id = Some("{some-device-id}".to_string());
+        s.speaker_bvc_backend = tse_engine::SpeakerBvcBackend::DeepFilter.to_index();
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(s, back);

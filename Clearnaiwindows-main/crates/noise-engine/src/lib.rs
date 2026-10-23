@@ -190,10 +190,27 @@ const BUNDLED_MODEL_TAR_GZ: &[u8] = include_bytes!("../assets/DeepFilterNet3_onn
 /// remains for a caller that wants to point at a *different* model file
 /// instead.
 pub fn load_bundled_deep_filter() -> Result<DeepFilterEngine> {
-    let path = std::env::temp_dir().join("clearnai-deepfilternet3-onnx.tar.gz");
+    // A unique path per call (rather than one fixed shared name) - this is
+    // now called more than once per process (mic path + speaker path, each
+    // wanting their own independent instance). Two calls writing the exact
+    // same bytes to the exact same fixed path were harmless as long as they
+    // ran sequentially, but a fixed shared path is a latent race if this
+    // ever gets parallelized - a unique path per call removes that risk
+    // entirely rather than relying on call ordering to stay safe.
+    static CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let call_id = CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("clearnai-deepfilternet3-onnx-{}-{call_id}.tar.gz", std::process::id()));
     std::fs::write(&path, BUNDLED_MODEL_TAR_GZ)
         .with_context(|| format!("extracting bundled DeepFilterNet model to {}", path.display()))?;
-    DeepFilterEngine::new(&path)
+    let result = DeepFilterEngine::new(&path);
+    // Best-effort cleanup either way - the model is fully loaded into
+    // memory by `DeepFilterEngine::new` (or failed trying), so the on-disk
+    // copy is never needed again after this point. Unlike the old fixed
+    // shared path (implicitly "cleaned up" by simply being overwritten next
+    // launch), unique per-call paths would otherwise accumulate one orphan
+    // file per call, forever, without this.
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 impl DeepFilterEngine {
