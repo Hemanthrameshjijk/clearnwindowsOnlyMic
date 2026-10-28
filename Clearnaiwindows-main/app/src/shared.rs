@@ -626,6 +626,12 @@ pub struct EngineHandles {
     /// Same as `mic_hush_status`, for the `Hush (bpo_v1)` backend's own,
     /// independent watchdog.
     pub mic_bpo_v1_status: Option<WatchdogStatus>,
+    /// Accent conversion (voice choice + live status). Inert ("unavailable") until the real Windows engine
+    /// overwrites it with the handle of the running worker - same "construct inert, then wire the real thing"
+    /// pattern as `mic_hush_status`.
+    pub accent: accent_onnx::pipeline::AccentHandle,
+    /// Live transcript (lines + status). Inert until the real engine replaces it.
+    pub transcript: asr_onnx::pipeline::TranscriptHandle,
     /// The enrolled target speaker (or none), read by the realtime TSE
     /// stage via `tse_engine::TseStageAdapter` and written by
     /// `enrollment`'s worker thread - never touched directly by the GUI or
@@ -739,6 +745,8 @@ impl EngineHandles {
             // the real `WatchdogStage`s exist - see `mic_hush_status`'s docs.
             mic_hush_status: None,
             mic_bpo_v1_status: None,
+            accent: accent_onnx::pipeline::AccentHandle::unavailable("accent engine not started"),
+            transcript: asr_onnx::pipeline::TranscriptHandle::unavailable("transcript engine not started"),
             target_speaker_store,
             tse_speaker_store,
             vanta_speaker_store,

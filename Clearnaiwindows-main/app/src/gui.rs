@@ -187,12 +187,22 @@ enum Screen {
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    /// The window was closed: end the process at once (see `update`).
+    WindowClosed,
     ToggleMicNoise(bool),
     /// "Voice Gate (suppress quiet background voices)" toggled - see
     /// `dsp_core::VoiceGateStage`'s docs.
     ToggleMicVoiceGate(bool),
     ToggleMicStudio(bool),
     SelectMicStudioPreset(&'static str),
+    /// Accent conversion on/off - its own switch, independent of BVC.
+    ToggleAccent(bool),
+    /// Accent voice picker (label from `accent_onnx::VOICE_CHOICES`).
+    SelectAccentVoice(&'static str),
+    /// Live transcript on/off.
+    ToggleTranscript(bool),
+    /// Empty the transcript box (the saved file is kept).
+    ClearTranscript,
     SelectMicTarget(DeviceOption),
     SelectPhysicalMic(DeviceOption),
     ToggleMonitor(bool),
@@ -333,6 +343,24 @@ fn next_seq(seq: &AtomicU64) -> u64 {
 /// handles the one-way `Setup -> Main` transition when `update_setup`
 /// reports the user is done with the setup screen.
 fn update(screen: &mut Screen, message: Message) {
+    if matches!(message, Message::WindowClosed) {
+        crate::log_error!("[clearnairt] window close requested - terminating process");
+        // Closing the window must end the app. Letting iced unwind normally drops the audio engine, whose
+        // capture/render drops join their threads; a thread stuck on an invalid device (or a model run) then
+        // leaves a hung "Not responding" clearnairt.exe in the background. Settings are saved when changed.
+        #[cfg(windows)]
+        {
+            // ExitProcess runs DLL detach for onnxruntime/audio libraries, which was observed to spin and hang;
+            // TerminateProcess ends the process immediately.
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentProcess() -> isize;
+                fn TerminateProcess(h: isize, code: u32) -> i32;
+            }
+            unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+        }
+        std::process::exit(0);
+    }
     let transition = match screen {
         Screen::Main(state) => {
             update_main(state, message);
@@ -455,6 +483,24 @@ fn update_main(state: &mut MainState, message: Message) {
                 let index = studio_preset_to_index(preset);
                 state.handles.mic_studio_preset.store(index);
                 state.settings.mic_studio_preset = index;
+                persist(&state.settings);
+            }
+        }
+        Message::ToggleAccent(on) => {
+            state.settings.accent_on = on;
+            state.handles.accent.set_voice(state.settings.accent_effective_voice());
+            persist(&state.settings);
+        }
+        Message::ToggleTranscript(on) => {
+            state.settings.transcript_on = on;
+            state.handles.transcript.set_enabled(on);
+            persist(&state.settings);
+        }
+        Message::ClearTranscript => state.handles.transcript.clear(),
+        Message::SelectAccentVoice(label) => {
+            if let Some(i) = accent_onnx::VOICE_CHOICES.iter().position(|l| *l == label) {
+                state.settings.accent_voice = i as u8 + 1;
+                state.handles.accent.set_voice(state.settings.accent_effective_voice());
                 persist(&state.settings);
             }
         }
@@ -684,7 +730,7 @@ fn update_main(state: &mut MainState, message: Message) {
         // Setup-screen-only messages; unreachable once `Screen::Main` is
         // active (its `view` never emits them), same reasoning as the
         // catch-all in `update_setup`.
-        Message::ContinueFromSetup => {}
+        Message::ContinueFromSetup | Message::WindowClosed => {}
     }
 }
 
@@ -1078,6 +1124,83 @@ fn view_main(state: &MainState) -> Element<'_, Message> {
     ]
     .spacing(8);
 
+    // Accent: its own on/off switch (independent of BVC) + voice picker + live status (RTF, added latency).
+    let accent_on = state.settings.accent_on;
+    let accent_status = state.handles.accent.status();
+    let accent_label = accent_onnx::VOICE_CHOICES[(state.settings.accent_voice_index() - 1) as usize];
+    // The switch only records what you clicked; this line says what is REALLY happening (green = converting,
+    // amber = starting, red = switched on but NOT converting, grey = off), so a lit switch can never mislead.
+    let (accent_dot, accent_color) = match accent_status.state {
+        accent_onnx::pipeline::AccentState::Active => ("\u{25CF}", Color::from_rgb(0.2, 0.65, 0.3)),
+        accent_onnx::pipeline::AccentState::Loading | accent_onnx::pipeline::AccentState::Starting => {
+            ("\u{25CF}", Color::from_rgb(0.9, 0.65, 0.1))
+        }
+        accent_onnx::pipeline::AccentState::Paused | accent_onnx::pipeline::AccentState::Unavailable => {
+            ("\u{25CF}", Color::from_rgb(0.85, 0.2, 0.2))
+        }
+        accent_onnx::pipeline::AccentState::Off => ("\u{25CB}", Color::from_rgb(0.55, 0.55, 0.55)),
+    };
+    let accent_section = column![
+        toggler(accent_on).label("Accent conversion (Indian -> American English)").on_toggle(Message::ToggleAccent),
+        row![
+            text("Accent voice").size(12),
+            pick_list(&accent_onnx::VOICE_CHOICES[..], Some(accent_label), Message::SelectAccentVoice),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+        text(format!("{accent_dot} {}", accent_status.line())).size(12).color(accent_color),
+        text("Works with BVC on or off; cleaner input (BVC on) converts better.").size(11).color(Color::from_rgb(0.55, 0.55, 0.55)),
+    ]
+    .spacing(2);
+
+    // Live transcript: its own switch; shows the last lines (+ the sentence in progress) and where it is saved.
+    let transcript_status = state.handles.transcript.status();
+    let (transcript_dot, transcript_color) = match transcript_status.state {
+        asr_onnx::pipeline::TranscriptState::Listening | asr_onnx::pipeline::TranscriptState::Transcribing => {
+            ("\u{25CF}", Color::from_rgb(0.2, 0.65, 0.3))
+        }
+        asr_onnx::pipeline::TranscriptState::Loading => ("\u{25CF}", Color::from_rgb(0.9, 0.65, 0.1)),
+        asr_onnx::pipeline::TranscriptState::Unavailable => ("\u{25CF}", Color::from_rgb(0.85, 0.2, 0.2)),
+        asr_onnx::pipeline::TranscriptState::Off => ("\u{25CB}", Color::from_rgb(0.55, 0.55, 0.55)),
+    };
+    let mut transcript_section = column![
+        toggler(state.settings.transcript_on).label("Live transcript (speech to text)").on_toggle(Message::ToggleTranscript),
+        text(format!("{transcript_dot} {}", transcript_status.line())).size(12).color(transcript_color),
+    ]
+    .spacing(2);
+    if state.settings.transcript_on {
+        let (lines, partial) = state.handles.transcript.snapshot(30);
+        let mut body = column![].spacing(2);
+        if lines.is_empty() && partial.is_empty() {
+            body = body.push(text("Say something - your words appear here.").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)));
+        }
+        for l in lines {
+            body = body.push(text(format!("[{}] {}", asr_onnx::pipeline::fmt_time(l.at_secs), l.text)).size(13));
+        }
+        if !partial.is_empty() {
+            body = body.push(text(format!("... {partial}")).size(13).color(Color::from_rgb(0.55, 0.55, 0.55)));
+        }
+        transcript_section = transcript_section
+            .push(container(scrollable(body).height(Length::Fixed(130.0)).anchor_bottom()).padding(6).width(Length::Fill))
+            .push(
+                row![
+                    button(text("Clear").size(12)).on_press(Message::ClearTranscript),
+                    text(
+                        state
+                            .handles
+                            .transcript
+                            .save_path()
+                            .map(|p| format!("Saved to {}", p.display()))
+                            .unwrap_or_else(|| "Saved to the ClearNAI folder, transcripts".to_string())
+                    )
+                    .size(11)
+                    .color(Color::from_rgb(0.55, 0.55, 0.55)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+    }
+
     let toggles = column![
         toggler(state.handles.mic_noise.is_on())
             .label("RNNoise (between Mic and Virtual Mic)")
@@ -1091,6 +1214,8 @@ fn view_main(state: &MainState) -> Element<'_, Message> {
                 .color(Color::from_rgb(0.55, 0.55, 0.55)),
         ]
         .spacing(2),
+        accent_section,
+        transcript_section,
         toggler(state.handles.mic_studio.is_on())
             .label("Studio")
             .on_toggle(Message::ToggleMicStudio),
@@ -1365,7 +1490,10 @@ fn view(screen: &Screen) -> Element<'_, Message> {
 }
 
 fn subscription(_screen: &Screen) -> Subscription<Message> {
-    iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick)
+    Subscription::batch([
+        iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick),
+        iced::window::close_requests().map(|_| Message::WindowClosed),
+    ])
 }
 
 /// Runs the GUI. Blocks until the window is closed, at which point the
@@ -1425,6 +1553,7 @@ pub fn run(initial: Initial) -> iced::Result {
     )
     .title("ClearNAI")
     .subscription(subscription)
+    .exit_on_close_request(false)
     .window_size(iced::Size::new(560.0, 720.0))
     .run()
 }

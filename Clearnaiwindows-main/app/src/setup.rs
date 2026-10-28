@@ -430,9 +430,148 @@ pub fn ensure_bvc_assets_extracted(target_dir: &Path) -> anyhow::Result<Extracti
     Ok(ExtractionOutcome { dll, speaker_dll, model, bpo_v1_model, onnxruntime_dll })
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Accent model bundle (`app_models`)
+//
+// Unlike the Hush bundle (8 MB, `include_bytes!`-embedded), the accent bundle is ~270 MB (a 194 MB encoder, a 27 MB
+// decoder and a 52 MB vocoder, all fp32), far past what can be committed to git or reasonably embedded in the exe.
+// It is shipped as a folder next to `clearnairt.exe` (`app_models/`, see `installer.nsi`) and installed into
+// `%LOCALAPPDATA%\ClearNAI\app_models` the same way the Hush bundle is: a file is only (re)written when its FULL
+// content differs from the shipped one (never a size-only check; see `extract_one_if_needed`'s docs for why).
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Where the accent bundle lives once installed.
+pub fn accent_models_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("app_models")
+}
+
+/// Where the shipped accent bundle is looked up: `ACCENT_MODELS_SRC`, else `app_models` next to the exe.
+pub fn accent_models_source_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("ACCENT_MODELS_SRC") {
+        return Some(PathBuf::from(p));
+    }
+    std::env::current_exe().ok()?.parent().map(|d| d.join("app_models"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccentBundleState {
+    /// Installed target already matched the shipped files byte for byte (or no shipped copy exists to compare
+    /// against and the installed one is complete).
+    AlreadyPresent,
+    /// At least one file was missing or differed and was (re)copied.
+    Installed,
+}
+
+/// Streaming full-content comparison (1 MiB chunks), so a 194 MB file is never held in memory twice.
+fn files_identical(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let (ma, mb) = (std::fs::metadata(a)?, std::fs::metadata(b)?);
+    if ma.len() != mb.len() {
+        return Ok(false);
+    }
+    let (mut fa, mut fb) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let n = fa.read(&mut ba)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        fb.read_exact(&mut bb[..n])?;
+        if ba[..n] != bb[..n] {
+            return Ok(false);
+        }
+    }
+}
+
+fn copy_atomically(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let part = dst.with_extension(match dst.extension() {
+        Some(ext) => format!("{}.part", ext.to_string_lossy()),
+        None => "part".to_string(),
+    });
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
+    }
+    let result = std::fs::copy(src, &part)
+        .map_err(|e| anyhow::anyhow!("failed to copy {} to {}: {e}", src.display(), part.display()))
+        .and_then(|_| {
+            std::fs::rename(&part, dst).map_err(|e| anyhow::anyhow!("failed to move {} into place: {e}", dst.display()))
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
+}
+
+/// Makes `target` hold exactly the files of the shipped bundle in `source`. Errors if neither a shipped copy nor a
+/// complete installed copy exists. Called lazily, from the accent worker thread, the first time Accent is switched
+/// on - a user who never enables it pays nothing at launch.
+pub fn ensure_accent_models(source: Option<&Path>, target: &Path) -> anyhow::Result<AccentBundleState> {
+    let files = accent_onnx::BUNDLE_FILES;
+    let source = source.filter(|s| s.is_dir() && *s != target);
+    let Some(source) = source else {
+        let missing: Vec<&str> = files.iter().copied().filter(|f| !target.join(f).is_file()).collect();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "accent model bundle not found: no `app_models` folder next to the exe and {} is missing {}",
+            target.display(),
+            missing.join(", ")
+        );
+        return Ok(AccentBundleState::AlreadyPresent);
+    };
+    let missing: Vec<&str> = files.iter().copied().filter(|f| !source.join(f).is_file()).collect();
+    anyhow::ensure!(missing.is_empty(), "shipped accent bundle {} is missing {}", source.display(), missing.join(", "));
+    let mut changed = false;
+    for f in files {
+        let (s, t) = (source.join(f), target.join(f));
+        let same = t.is_file() && files_identical(&s, &t).unwrap_or(false);
+        if !same {
+            copy_atomically(&s, &t)?;
+            changed = true;
+        }
+    }
+    Ok(if changed { AccentBundleState::Installed } else { AccentBundleState::AlreadyPresent })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_bundle(dir: &Path, fill: u8) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (i, f) in accent_onnx::BUNDLE_FILES.iter().enumerate() {
+            std::fs::write(dir.join(f), vec![fill.wrapping_add(i as u8); 3_000_000 + i]).unwrap();
+        }
+    }
+
+    #[test]
+    fn accent_bundle_installs_then_is_idempotent_and_compares_full_content() {
+        let root = std::env::temp_dir().join(format!("clearnai_accent_bundle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        fake_bundle(&src, 10);
+
+        assert_eq!(ensure_accent_models(Some(&src), &dst).unwrap(), AccentBundleState::Installed);
+        assert_eq!(ensure_accent_models(Some(&src), &dst).unwrap(), AccentBundleState::AlreadyPresent);
+
+        // Same length, one byte different deep inside the file: a size check would miss it, a full compare must not.
+        let victim = dst.join(accent_onnx::BUNDLE_FILES[4]);
+        let mut bytes = std::fs::read(&victim).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&victim, &bytes).unwrap();
+        assert_eq!(ensure_accent_models(Some(&src), &dst).unwrap(), AccentBundleState::Installed);
+        assert!(files_identical(&src.join(accent_onnx::BUNDLE_FILES[4]), &victim).unwrap());
+
+        // A newer shipped bundle replaces the installed one.
+        fake_bundle(&src, 99);
+        assert_eq!(ensure_accent_models(Some(&src), &dst).unwrap(), AccentBundleState::Installed);
+
+        // No shipped copy, but a complete installed one: usable as is.
+        assert_eq!(ensure_accent_models(None, &dst).unwrap(), AccentBundleState::AlreadyPresent);
+        std::fs::remove_file(dst.join("catalog.json")).unwrap();
+        assert!(ensure_accent_models(None, &dst).unwrap_err().to_string().contains("catalog.json"));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn windows_10_and_11_major_version_is_supported() {

@@ -159,6 +159,29 @@ pub struct Settings {
     /// chosen to proceed past once.
     #[serde(default)]
     pub setup_acknowledged: bool,
+    /// Accent conversion switch - its own toggle, independent of BVC. Default
+    /// OFF; `#[serde(default)]` keeps every older `settings.json` loading.
+    #[serde(default)]
+    pub accent_on: bool,
+    /// Which American voice Accent uses: `1..=3` = male 1-3, `4..=6` = female
+    /// 1-3 (see `accent_onnx::VOICE_NAMES`); `0`/out of range = male 1. Use
+    /// [`Settings::accent_voice_index`] rather than reading this directly.
+    #[serde(default)]
+    pub accent_voice: u8,
+    /// Live transcript (speech-to-text of your own mic). Default OFF; `#[serde(default)]` keeps older files loading.
+    #[serde(default)]
+    pub transcript_on: bool,
+}
+
+impl Settings {
+    /// The voice index to use when Accent is on (always `1..=6`).
+    pub fn accent_voice_index(&self) -> u8 {
+        if (1..=6).contains(&self.accent_voice) { self.accent_voice } else { 1 }
+    }
+    /// The value for `AccentHandle::set_voice`: `0` (off) unless the toggle is on.
+    pub fn accent_effective_voice(&self) -> u8 {
+        if self.accent_on { self.accent_voice_index() } else { 0 }
+    }
 }
 
 fn default_true() -> bool {
@@ -206,6 +229,9 @@ impl Default for Settings {
             mic_bvc_backend: default_bvc_backend(),
             reference_sentence: default_reference_sentence(),
             setup_acknowledged: false,
+            accent_on: false,
+            accent_voice: 1,
+            transcript_on: false,
         }
     }
 }
@@ -444,6 +470,36 @@ mod tests {
         assert!(s.speaker_noise_on);
         assert!(s.speaker_bvc_on);
         assert!(s.speaker_studio_on);
+    }
+
+    #[test]
+    fn settings_json_from_before_accent_existed_still_loads_with_accent_off() {
+        let json = r#"{
+            "mic_noise_on": true,
+            "mic_bvc_on": true,
+            "mic_studio_on": true,
+            "aec_on": false,
+            "speaker_tap_on": true,
+            "virtual_mic_target_id": null,
+            "virtual_speaker_source_id": null
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("old-format settings.json must still parse");
+        assert!(!s.accent_on, "Accent defaults Off");
+        assert_eq!(s.accent_effective_voice(), 0);
+        assert_eq!(s.accent_voice_index(), 1, "a missing voice means American male 1");
+        assert!(!Settings::default().accent_on);
+    }
+
+    #[test]
+    fn round_trips_accent_voice_through_json() {
+        let mut s = Settings::default();
+        s.accent_on = true;
+        s.accent_voice = 5;
+        assert_eq!(s.accent_effective_voice(), 5);
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(json.contains("\"accent_voice\":5") && json.contains("\"accent_on\":true"));
+        let back: Settings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(s, back);
     }
 
     #[test]

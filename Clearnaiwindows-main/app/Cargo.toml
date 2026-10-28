@@ -58,6 +58,11 @@ tse-bsrnn = { path = "../crates/tse-bsrnn" }
 # alongside the app).
 bvc-vanta = { path = "../crates/bvc-vanta" }
 
+# Real-time accent conversion (Indian -> American English), ONNX Runtime based. Runs on its own worker thread;
+# the mic pipeline only exchanges samples with it through two lock-free rings (see that crate's `pipeline` docs).
+accent-onnx = { path = "../crates/accent-onnx" }
+asr-onnx = { path = "../crates/asr-onnx" }
+
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

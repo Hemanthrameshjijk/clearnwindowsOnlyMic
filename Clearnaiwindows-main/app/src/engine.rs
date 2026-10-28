@@ -141,6 +141,11 @@ pub struct LiveAudioSwitcher {
     monitor_render: Mutex<Option<HardwareRender>>,
     speaker_capture: Mutex<Option<MicCapture>>,
     speaker_render: Mutex<Option<HardwareRender>>,
+    /// Real speaker/headphone output chosen for the speaker path (`None` =
+    /// system default). The speaker render only runs while a speaker source
+    /// is selected (like the monitor), so selecting a source later needs this
+    /// to know where to start it.
+    real_speaker_output_id: Mutex<Option<String>>,
 
     mic_in_swap: SwapConsumer,
     mic_out_swap: SwapProducer,
@@ -245,6 +250,10 @@ impl LiveDeviceSwitcher for LiveAudioSwitcher {
                     Ok(capture) => {
                         *self.speaker_in_swap.lock().unwrap() = Some(consumer);
                         Self::stop_and_replace_mic(&self.speaker_capture, Some(capture));
+                        if self.speaker_render.lock().unwrap().is_none() {
+                            let output = self.real_speaker_output_id.lock().unwrap().clone();
+                            self.set_real_speaker_output(output);
+                        }
                     }
                     Err(e) => {
                         crate::log_error!(
@@ -257,6 +266,8 @@ impl LiveDeviceSwitcher for LiveAudioSwitcher {
             None => {
                 *self.speaker_in_swap.lock().unwrap() = None;
                 Self::stop_and_replace_mic(&self.speaker_capture, None);
+                *self.speaker_out_swap.lock().unwrap() = None;
+                Self::stop_and_replace_render(&self.speaker_render, None);
             }
         }
     }
@@ -267,6 +278,13 @@ impl LiveDeviceSwitcher for LiveAudioSwitcher {
     /// output device" (matching `physical_mic`'s own convention), not
     /// "disabled" - there's always a sensible real device to fall back to.
     fn set_real_speaker_output(&self, device_id: Option<String>) {
+        *self.real_speaker_output_id.lock().unwrap() = device_id.clone();
+        // No speaker source selected: nothing to play, so no render thread
+        // either (it would only write silence and report underruns). It is
+        // started by `set_virtual_speaker_source` once a source is picked.
+        if self.speaker_capture.lock().unwrap().is_none() {
+            return;
+        }
         let (producer, consumer) = make_ring_buffer(2.0);
         let started = match device_id.as_deref() {
             Some(id) => HardwareRender::start_on_device_id(id, consumer, self.speaker_counters.clone()),
@@ -372,35 +390,15 @@ pub fn default_virtual_mic_target(list: &DeviceList) -> Option<String> {
     }
 }
 
-/// Auto-selects the "virtual speaker source" capture device only if exactly
-/// one capture endpoint looks like a VB-Cable-style "CABLE Output". In the
-/// common case of a single VB-Cable install, this is also the device the
-/// mic-target render already paired with, which is exactly the collision
-/// `docs/VIRTUAL_DEVICES.md` documents - callers should treat an
-/// auto-selected speaker-source id that equals the auto-selected mic-target
-/// id's paired endpoint as a signal to warn the user to install a *second*
-/// virtual cable instance.
-pub fn default_virtual_speaker_source(list: &DeviceList) -> Option<String> {
-    let mut matches = list
-        .capture
-        .iter()
-        .filter(|d| devices::name_contains_cable_output(&d.label));
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        None
-    } else {
-        Some(first.id.clone())
-    }
-}
-
 /// Starts the full engine: loads BVC (or falls back to a real no-op stage,
 /// honestly reflected in `EngineHandles::mic_bvc_available`/
 /// `speaker_bvc_available`), constructs every
 /// DSP stage up front (regardless of initial toggle state), wires the three
 /// required pipelines, and starts their WASAPI threads.
 ///
-/// `virtual_mic_target_id` / `virtual_speaker_source_id` are the
-/// user-selected (or auto-detected) device ids for the two virtual-cable
+/// `virtual_mic_target_id` is the user-selected (or auto-detected) device id
+/// and `virtual_speaker_source_id` the user-selected one (never auto-detected,
+/// see `main.rs::bootstrap`) for the two virtual-cable
 /// roles described in `docs/VIRTUAL_DEVICES.md`. Either may be `None`, in
 /// which case the corresponding half of the pipeline is not started and a
 /// warning is added to `BootstrapOutcome`'s handles - this is not an error,
@@ -814,6 +812,34 @@ pub fn start(
     handles.mic_hush_status = mic_hush_status;
     handles.mic_bpo_v1_status = mic_bpo_v1_status;
 
+    // Accent conversion: the stage goes into the mic pipeline (after BVC, before AutoGain; a single atomic load
+    // when Off), the worker thread and the (large) model bundle are only touched once a voice is selected.
+    let accent_stage = {
+        let app_data = bvc_assets_dir.to_path_buf();
+        let mut cfg = accent_onnx::pipeline::AccentConfig::new(crate::setup::onnxruntime_dll_path(bvc_assets_dir));
+        cfg.initial_voice = settings.accent_effective_voice();
+        cfg.prepare_models = Some(Box::new(move || {
+            let target = crate::setup::accent_models_dir(&app_data);
+            crate::setup::ensure_accent_models(crate::setup::accent_models_source_dir().as_deref(), &target)
+                .map(|_| target)
+                .map_err(|e| format!("{e:#}"))
+        }));
+        let (stage, accent_handle) = accent_onnx::pipeline::start(cfg);
+        handles.accent = accent_handle;
+        stage
+    };
+
+    // Live transcript: a pure tap (never changes the audio) right before the Accent stage; the speech model is
+    // loaded lazily the first time the toggle is switched on.
+    let transcript_stage = {
+        let mut cfg = asr_onnx::pipeline::TranscriptConfig::new(crate::setup::onnxruntime_dll_path(bvc_assets_dir));
+        cfg.initial_enabled = settings.transcript_on;
+        cfg.save_dir = Some(bvc_assets_dir.join("transcripts"));
+        let (stage, transcript_handle) = asr_onnx::pipeline::start(cfg);
+        handles.transcript = transcript_handle;
+        stage
+    };
+
     // --- Ring buffers. 2 seconds of headroom at 48kHz is generous relative
     // to the 10ms frame size; sized once here, never resized (a live device
     // switch later builds a brand new pair - see `LiveAudioSwitcher`). ---
@@ -934,6 +960,8 @@ pub fn start(
         mic_voice_gate_stage,
         mic_noise_stage,
         mic_bvc_stage,
+        accent_stage,
+        transcript_stage,
         mic_studio_stage,
         driver_writer,
         enrollment_tap,
@@ -972,7 +1000,10 @@ pub fn start(
             (None, None)
         }
     };
-    let (speaker_render, speaker_out_c) = {
+    let (speaker_render, speaker_out_c) = if speaker_in_p.is_none() {
+        // Like the monitor: no render until a speaker source is selected.
+        (None, None)
+    } else {
         let (p, c) = make_ring_buffer(2.0);
         let started = match real_speaker_output_id {
             Some(id) => HardwareRender::start_on_device_id(id, c, handles.speaker_counters.clone()),
@@ -1008,6 +1039,7 @@ pub fn start(
         monitor_render: Mutex::new(monitor_render),
         speaker_capture: Mutex::new(speaker_capture),
         speaker_render: Mutex::new(speaker_render),
+        real_speaker_output_id: Mutex::new(real_speaker_output_id.map(str::to_string)),
         mic_in_swap,
         mic_out_swap,
         monitor_out_swap,
@@ -1148,6 +1180,8 @@ fn spawn_mic_pipeline(
     mut voice_gate_stage: Box<dyn Stage>,
     mut noise_stage: Box<dyn Stage>,
     mut bvc_stage: Box<dyn Stage>,
+    mut accent_stage: accent_onnx::pipeline::AccentStage,
+    mut transcript_stage: asr_onnx::pipeline::TranscriptStage,
     mut studio_stage: Box<dyn Stage>,
     driver_writer: Option<driver_transport::SharedRingWriter>,
     mut enrollment_tap: enrollment::EnrollmentTap,
@@ -1238,8 +1272,17 @@ fn spawn_mic_pipeline(
                 // no-op) is unchanged.
                 if handles.mic_bvc.is_on() {
                     bvc_stage.process(&mut frame);
+                    transcript_stage.process(&mut frame); // tap only: what you said, after BVC cleanup
+                    // Accent conversion sits right after BVC (which does the cleanup) and before AutoGain.
+                    // Off = one atomic load, frame untouched. It is its own switch, independent of BVC.
+                    accent_stage.process(&mut frame);
                     auto_gain.process(&mut frame);
                 } else {
+                    // BVC off: Accent (if switched on) gets the post-voice-gate mic signal - never the
+                    // RNNoise output, which runs after it. Cleaner input = better conversion, so BVC on is
+                    // still recommended.
+                    transcript_stage.process(&mut frame);
+                    accent_stage.process(&mut frame);
                     auto_gain.process(&mut frame);
                     run_if_enabled(noise_stage.as_mut(), &handles.mic_noise, &mut frame);
                     // `handles.mic_bvc` is already known false here, so this

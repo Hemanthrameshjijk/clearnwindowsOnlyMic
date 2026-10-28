@@ -1,0 +1,14 @@
+[package]
+name = "asr-onnx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Same ort / ONNX Runtime setup as accent-onnx (load-dynamic against the shipped onnxruntime.dll).
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["load-dynamic"] }
+realfft = "3"
+# init_ort / make_session helpers.
+accent-onnx = { path = "../accent-onnx" }
+# CausalDownsampler3x (48k -> 16k).
+tse-bsrnn = { path = "../tse-bsrnn" }
+dsp-core = { path = "../dsp-core" }

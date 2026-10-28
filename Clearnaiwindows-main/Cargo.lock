@@ -19,6 +19,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
+name = "accent-onnx"
+version = "0.1.0"
+dependencies = [
+ "dsp-core",
+ "flate2",
+ "ort",
+ "realfft",
+ "serde_json",
+ "tse-bsrnn",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -171,6 +183,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
  "libloading 0.8.9",
+]
+
+[[package]]
+name = "asr-onnx"
+version = "0.1.0"
+dependencies = [
+ "accent-onnx",
+ "dsp-core",
+ "ort",
+ "realfft",
+ "tse-bsrnn",
 ]
 
 [[package]]
@@ -601,7 +624,9 @@ dependencies = [
 name = "clearnai-app"
 version = "0.1.0"
 dependencies = [
+ "accent-onnx",
  "anyhow",
+ "asr-onnx",
  "audio-io",
  "bvc-hush",
  "bvc-vanta",

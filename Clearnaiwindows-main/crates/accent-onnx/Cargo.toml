@@ -1,0 +1,15 @@
+[package]
+name = "accent-onnx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Same ort as the workspace lock (bvc-vanta's ECAPA); ort-sys has `links = "onnxruntime"` so the workspace can
+# only hold ONE ort version. rc.13 only needs ONNX Runtime API >= 17, so it loads the shipped 1.19.x DLL.
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["load-dynamic"] }
+realfft = "3"
+flate2 = "1"
+# CausalDownsampler3x (48k -> 16k), reused as asked.
+tse-bsrnn = { path = "../tse-bsrnn" }
+serde_json = "1"
+dsp-core = { path = "../dsp-core" }

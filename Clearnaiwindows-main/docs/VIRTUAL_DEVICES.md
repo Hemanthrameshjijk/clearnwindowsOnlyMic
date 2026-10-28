@@ -42,16 +42,16 @@ Then, in ClearNAI's GUI:
 - `audio-io::devices::find_vb_cable_endpoints()` looks for endpoints whose
   friendly name contains "CABLE Input"/"CABLE Output" (VB-Cable's *default*
   single-pair naming). ClearNAI's startup logic
-  (`app/src/engine.rs::default_virtual_mic_target` /
-  `default_virtual_speaker_source`) only **auto-selects** a device for a role
-  when exactly one matching endpoint exists for that role - it never guesses
-  between multiple candidates, and it never assumes the same physical cable
-  pair is safe to use for both roles simultaneously.
-- If your system only has one virtual cable pair installed, at most **one**
-  of the two roles can be auto-selected (or neither, if the naming doesn't
-  match); the other role's dropdown will show "(not selected)" and that half
-  of the pipeline will not start (this is treated as a startup warning, not
-  a crash - see the GUI's warning banner).
+  (`app/src/engine.rs::default_virtual_mic_target`) only **auto-selects** the
+  *virtual mic target* when exactly one matching endpoint exists - it never
+  guesses between multiple candidates. The *virtual speaker source* is never
+  auto-selected (like the Monitor output): with a single cable its only
+  candidate would be the other end of the cable the mic path renders into,
+  i.e. the speaker path would play your own processed voice back.
+- If your system only has one virtual cable pair installed, only the virtual
+  mic target is auto-selected; the speaker path stays off ("(not selected)",
+  no capture and no render thread) until you pick a speaker source yourself
+  (this is a startup warning, not a crash - see the GUI's warning banner).
 - The GUI's two device pickers (populated from
   `audio_io::devices::list_render_devices()` /
   `list_capture_devices()`) let you assign **any** enumerated device to

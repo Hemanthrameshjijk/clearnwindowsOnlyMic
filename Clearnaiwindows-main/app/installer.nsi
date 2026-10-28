@@ -57,6 +57,30 @@ Section "Install"
   ; this one in CI (see .github/workflows/windows.yml).
   File "..\target\release\${APP_EXE}"
 
+  ; Accent-conversion model bundle (~270 MB), shipped as a folder next to the exe and installed into
+  ; %LOCALAPPDATA%\ClearNAI\app_models on first use (setup.rs compares full contents). Put the files in
+  ; app\assets\app_models\ before building the installer; /nonfatal = the installer still builds without
+  ; them (Accent then reports "unavailable"). ecapa.onnx / librnnoise.dylib from the zip are not needed.
+  SetOutPath "$INSTDIR\app_models"
+  File /nonfatal "assets\app_models\catalog.json"
+  File /nonfatal "assets\app_models\features.npz"
+  File /nonfatal "assets\app_models\american_voices.npz"
+  File /nonfatal "assets\app_models\converter_best_v6dmel.npz"
+  File /nonfatal "assets\app_models\converter_best_v6dmel.onnx"
+  File /nonfatal "assets\app_models\converter_best_v6dmel.dec.onnx"
+  File /nonfatal "assets\app_models\vocoder_causal_hifigan_best.npz"
+  File /nonfatal "assets\app_models\vocoder_causal_hifigan_best.onnx"
+  SetOutPath "$INSTDIR"
+
+  ; Live-transcript speech model (~210 MB). The app looks for it in %LOCALAPPDATA%\ClearNAI\asr_models (this
+  ; folder). A reinstall removes the install folder, so without shipping it here the model vanished on every
+  ; update ("speech model not found"). Put the two files in app\assets\asr_models\ before building the installer
+  ; (fast_conformer_with_laughter_MatMul_qu8.ort and vocab.txt); /nonfatal = still builds without them.
+  SetOutPath "$INSTDIR\asr_models"
+  File /nonfatal "assets\asr_models\fast_conformer_with_laughter_MatMul_qu8.ort"
+  File /nonfatal "assets\asr_models\vocab.txt"
+  SetOutPath "$INSTDIR"
+
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"

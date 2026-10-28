@@ -12,17 +12,15 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use dsp_core::{Consumer, FrameCounters, FRAME_SAMPLES};
-use wasapi::{initialize_mta, DeviceEnumerator, Direction, StreamMode};
+use wasapi::{initialize_mta, Device, DeviceEnumerator, Direction, StreamMode};
 
 use crate::bytes::push_f32_le;
 use crate::devices::{find_render_device_by_name, open_render_device_by_id};
-use crate::{
-    engine_wave_format, sleep_respecting_stop, warn_if_buffer_size_mismatched, RECONNECT_BACKOFF,
-    REQUESTED_BUFFER_DURATION_HNS,
-};
+use crate::{engine_wave_format, warn_if_buffer_size_mismatched, RECONNECT_BACKOFF, REQUESTED_BUFFER_DURATION_HNS};
 
 // NOTE: same as capture.rs - `wasapi::Device` is not `Send` (raw COM
 // pointer), so only the device id `String` crosses into the render thread;
@@ -38,14 +36,15 @@ pub struct HardwareRender {
 impl HardwareRender {
     /// Opens the system default render device and starts pulling frames
     /// from `consumer` to play out. `counters` receives live underrun
-    /// telemetry (see `render_loop`).
+    /// telemetry (see `render_loop`). The default is looked up again on every
+    /// reconnect, so if the device it first resolved to goes away (Krisp
+    /// closed, headset unplugged) playback moves to whatever Windows now
+    /// considers the default instead of retrying the dead one forever.
     pub fn start_default(consumer: Consumer<f32>, counters: Arc<FrameCounters>) -> Result<Self> {
-        let enumerator = DeviceEnumerator::new().context("creating WASAPI device enumerator")?;
-        let device = enumerator
-            .get_default_device(&Direction::Render)
-            .context("opening default render device")?;
-        let device_id = device.get_id().context("reading default render device id")?;
-        Self::start_on_device_id(&device_id, consumer, counters)
+        // Checked once here so "there is no default render device at all" is
+        // still reported to the caller as an error.
+        default_render_device()?;
+        Self::spawn(RenderTarget::Default, consumer, counters)
     }
 
     /// Opens the render device whose friendly name contains `name_substr`
@@ -64,9 +63,12 @@ impl HardwareRender {
     /// specifically into "CABLE Input" rather than whatever the OS default
     /// happens to be.
     pub fn start_on_device_id(device_id: &str, consumer: Consumer<f32>, counters: Arc<FrameCounters>) -> Result<Self> {
+        Self::spawn(RenderTarget::Id(device_id.to_string()), consumer, counters)
+    }
+
+    fn spawn(target: RenderTarget, consumer: Consumer<f32>, counters: Arc<FrameCounters>) -> Result<Self> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let thread_stop = stop_flag.clone();
-        let device_id = device_id.to_string();
 
         let handle = thread::Builder::new()
             .name("audio-io-hw-render".into())
@@ -90,17 +92,30 @@ impl HardwareRender {
                 // contention clears), matching the "always warm, self
                 // healing" behavior the rest of this crate already has for
                 // toggles.
+                let mut failed_attempts: u32 = 0;
                 while !thread_stop.load(Ordering::Relaxed) {
-                    if let Err(e) = render_loop(&device_id, &mut consumer, &thread_stop, &counters) {
-                        crate::report_error(&format!(
-                            "[audio-io] hardware render thread error, retrying in {}s: {e:#}",
-                            RECONNECT_BACKOFF.as_secs()
-                        ));
+                    let mut streaming = false;
+                    let result = render_loop(&target, &mut consumer, &thread_stop, &counters, failed_attempts, &mut streaming);
+                    if streaming {
+                        failed_attempts = 0;
+                    }
+                    if let Err(e) = result {
+                        failed_attempts += 1;
+                        // A device that stays unavailable (unplugged headset,
+                        // stale id) fails identically on every attempt: say so
+                        // on the first failure and then about once a minute,
+                        // not every backoff for hours.
+                        if failed_attempts == 1 || failed_attempts % 30 == 0 {
+                            crate::report_error(&format!(
+                                "[audio-io] hardware render thread error (attempt {failed_attempts}), retrying every {}s: {e:#}",
+                                RECONNECT_BACKOFF.as_secs()
+                            ));
+                        }
                     }
                     if thread_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    sleep_respecting_stop(RECONNECT_BACKOFF, &thread_stop);
+                    wait_discarding(RECONNECT_BACKOFF, &mut consumer, &thread_stop);
                 }
             })
             .context("spawning hardware render thread")?;
@@ -129,19 +144,63 @@ impl Drop for HardwareRender {
     }
 }
 
+/// What a render thread opens on every (re)connect attempt.
+enum RenderTarget {
+    Id(String),
+    /// Whatever Windows' default render device is at the moment of the
+    /// attempt (not fixed when the thread was started).
+    Default,
+}
+
+fn default_render_device() -> Result<Device> {
+    DeviceEnumerator::new()
+        .context("creating WASAPI device enumerator")?
+        .get_default_device(&Direction::Render)
+        .context("opening default render device")
+}
+
+/// Sleeps for `duration` (like `sleep_respecting_stop`) while emptying
+/// `consumer` every few milliseconds. Used while the device is unavailable:
+/// nothing is playing the audio, so (a) the producer side must never find the
+/// ring full - it would drop and log "output ring buffer full" on every frame
+/// for as long as the device stays away - and (b) what piled up during the
+/// outage must not be played late once the device returns. A ring that filled
+/// during an outage stays full afterwards (producer and consumer both run at
+/// real time), i.e. up to the ring's 2 s of extra latency until the app is
+/// restarted.
+fn wait_discarding(duration: Duration, consumer: &mut Consumer<f32>, stop_flag: &Arc<AtomicBool>) {
+    let slice = Duration::from_millis(10);
+    let mut remaining = duration;
+    while remaining > Duration::ZERO {
+        if stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        while consumer.pop().is_ok() {}
+        let step = remaining.min(slice);
+        thread::sleep(step);
+        remaining -= step;
+    }
+}
+
 fn render_loop(
-    device_id: &str,
+    target: &RenderTarget,
     consumer: &mut Consumer<f32>,
     stop_flag: &Arc<AtomicBool>,
     counters: &FrameCounters,
+    failed_attempts: u32,
+    streaming: &mut bool,
 ) -> Result<()> {
     let _ = initialize_mta();
 
-    let device = open_render_device_by_id(device_id)
-        .with_context(|| format!("re-opening render device '{device_id}' on render thread"))?;
+    let device = match target {
+        RenderTarget::Id(id) => open_render_device_by_id(id)
+            .with_context(|| format!("re-opening render device '{id}' on render thread"))?,
+        RenderTarget::Default => default_render_device()?,
+    };
+    let name = device.get_friendlyname().unwrap_or_else(|_| "unnamed device".to_string());
     let mut audio_client = device
         .get_iaudioclient()
-        .context("activating IAudioClient on render device")?;
+        .with_context(|| format!("activating IAudioClient on render device '{name}'"))?;
 
     let format = engine_wave_format();
 
@@ -189,6 +248,12 @@ fn render_loop(
     audio_client
         .start_stream()
         .context("starting render stream")?;
+    *streaming = true;
+    crate::report_error(&if failed_attempts > 0 {
+        format!("[audio-io] INFO: hardware render is playing on '{name}' after {failed_attempts} failed attempt(s)")
+    } else {
+        format!("[audio-io] INFO: hardware render started on '{name}'")
+    });
 
     let mut pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES);
     let mut out_bytes: VecDeque<u8> = VecDeque::with_capacity(FRAME_SAMPLES * 4 * 4);
@@ -256,4 +321,32 @@ fn pull_frame(consumer: &mut Consumer<f32>, out: &mut [f32]) -> usize {
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsp_core::RingBuffer;
+
+    #[test]
+    fn backoff_wait_empties_a_full_ring() {
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(FRAME_SAMPLES * 4);
+        while producer.push(0.5).is_ok() {}
+        assert!(producer.push(0.5).is_err(), "ring starts full, like the monitor ring of a missing device");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        wait_discarding(Duration::from_millis(40), &mut consumer, &stop);
+
+        assert!(consumer.is_empty(), "stale audio is discarded");
+        assert!(producer.push(0.5).is_ok(), "the producer can write again");
+    }
+
+    #[test]
+    fn backoff_wait_returns_early_when_stopped() {
+        let (_producer, mut consumer) = RingBuffer::<f32>::new(FRAME_SAMPLES);
+        let stop = Arc::new(AtomicBool::new(true));
+        let t0 = std::time::Instant::now();
+        wait_discarding(Duration::from_secs(5), &mut consumer, &stop);
+        assert!(t0.elapsed() < Duration::from_secs(1));
+    }
 }

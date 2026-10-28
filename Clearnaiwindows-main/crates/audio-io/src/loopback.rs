@@ -258,8 +258,9 @@ fn loopback_loop(
                 .get_next_packet_size()
                 .context("polling loopback packet size")?
             {
-                Some(_) => {}
-                None => break,
+                // `Some(0)` = nothing waiting (see capture.rs): end here too, or this spins forever.
+                Some(frames) if frames > 0 => {}
+                _ => break,
             }
 
             capture_client
@@ -337,8 +338,9 @@ pub fn record_loopback_to_wav(seconds: f32, out_path: &Path) -> Result<()> {
                 .get_next_packet_size()
                 .context("polling loopback packet size")?
             {
-                Some(_) => {}
-                None => break,
+                // `Some(0)` = nothing waiting (see capture.rs): end here too, or this spins forever.
+                Some(frames) if frames > 0 => {}
+                _ => break,
             }
 
             capture_client

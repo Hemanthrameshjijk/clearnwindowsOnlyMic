@@ -29,3 +29,10 @@ poc/
 # committed; the real shipped asset is whatever's at app/assets/*.tar.gz,
 # and git history is the actual record of previous versions.
 app/assets/backup/
+
+# Accent-conversion model bundle (~270 MB of fp32 ONNX, far over GitHub's 100 MB file limit): shipped next to the
+# exe / put here for the installer, never committed. See docs/ACCENT.md.
+app/assets/app_models/
+app_models/
+app/assets/asr_models/
+asr_models/

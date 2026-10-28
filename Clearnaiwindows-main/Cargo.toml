@@ -14,6 +14,8 @@ members = [
     "crates/tse-engine",
     "crates/tse-bsrnn",
     "crates/bvc-vanta",
+    "crates/accent-onnx",
+    "crates/asr-onnx",
     "app",
 ]
 

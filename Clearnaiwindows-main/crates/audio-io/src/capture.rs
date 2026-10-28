@@ -193,12 +193,19 @@ fn capture_loop(
         }
 
         loop {
+            // Shared mode reports `Some(0)`, not `None`, when nothing is
+            // waiting - so this must end on 0 too. Ending only on `None`
+            // spun on GetBuffer at 100% of a core, never went back to wait
+            // for the event and never saw `stop_flag`: a live device switch
+            // then hung joining this thread, and the abandoned thread kept
+            // filling its old ring ("mic capture ring buffer full" and the
+            // dropped-frames counter climbing at 100/s, forever).
             match capture_client
                 .get_next_packet_size()
                 .context("polling capture packet size")?
             {
-                Some(_) => {}
-                None => break,
+                Some(frames) if frames > 0 => {}
+                _ => break,
             }
 
             capture_client
