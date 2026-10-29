@@ -1,6 +1,6 @@
-//! Causal 24 kHz -> 48 kHz (exact 2:1) upsampler. Same recipe as `tse_bsrnn::causal_resampler::CausalUpsampler3x`
+//! Causal 24 kHz -> 48 kHz (exact 2:1) upsampler. Same recipe as `crate::causal_resampler::CausalUpsampler3x`
 //! (zero-stuff, Hamming-windowed-sinc lowpass at 0.95 of Nyquist, gain-compensated, bounded history), which only
-//! exists for 3:1. The 48k -> 16k direction reuses tse-bsrnn's `CausalDownsampler3x` directly.
+//! exists for 3:1. The 48k -> 16k direction reuses `causal_resampler::CausalDownsampler3x` directly.
 
 pub struct CausalUpsampler2x {
     kernel: Vec<f32>, // unity-DC-gain lowpass, times 2 to compensate zero stuffing

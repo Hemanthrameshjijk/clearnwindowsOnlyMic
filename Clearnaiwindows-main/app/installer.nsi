@@ -37,13 +37,43 @@
 ; "file not found" error if it's missing, rather than silently skipping it.
 !define VBCABLE_INSTALLER "vendor\VBCABLE_Setup_x64.exe"
 
+; ~500 MB of models: solid LZMA gives the smallest download (slower to build, fine for CI/release).
+SetCompressor /SOLID lzma
+
+!include LogicLib.nsh
+!include x64.nsh
+!include WinVer.nsh
+
+; The VB-CABLE installer arguments. Empty = VB-Audio's own installer window (click "Install Driver"); this is the
+; verified-safe default. The community-reported silent switches are `-i -h` (VB-Audio does not document them, and
+; Windows still shows its own driver-trust prompt) - test on a clean machine and set this to "-i -h" only if it
+; behaves. NEVER use `-u` here (that uninstalls).
+!define VBCABLE_ARGS ""
+
+; ClearNAI logo for the installer and uninstaller executables (generated from assets\logo_mark_light.svg).
+Icon "assets\clearnai.ico"
+UninstallIcon "assets\clearnai.ico"
+
 Name "${APP_NAME}"
 OutFile "..\target\release\ClearNAI-Setup.exe"
 InstallDir "$LOCALAPPDATA\ClearNAI"
-; Per-user install: no admin/UAC prompt required, matching this app's own
-; behavior (it already only ever writes under the current user's
-; %LOCALAPPDATA%, never Program Files or HKLM).
+; Two-step install: ClearNAI itself installs per-user with NO admin prompt (the app only ever writes under the current
+; user's %LOCALAPPDATA%\ClearNAI, so there is no profile mix-up from a different admin account). Only when the VB-CABLE
+; driver is missing does the VB-CABLE step ask for admin (UAC prompt via "runas"); if it is already installed there
+; is no prompt at all.
 RequestExecutionLevel user
+; (shell folders default to the current user, which is what we want, so no SetShellVarContext is needed.)
+
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONSTOP "ClearNAI needs 64-bit Windows 10 or 11."
+    Abort
+  ${EndIf}
+  ${IfNot} ${AtLeastWin10}
+    MessageBox MB_OK|MB_ICONSTOP "ClearNAI needs Windows 10 or later."
+    Abort
+  ${EndIf}
+FunctionEnd
 
 Page directory
 Page instfiles
@@ -85,6 +115,10 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+
+  ; The call-audio path needs a SECOND virtual cable (VB-CABLE A+B). VB-Audio's licence does not allow bundling A+B
+  ; in another product's installer, so it is not shipped here: the user gets their official download page instead.
+  WriteINIStr "$SMPROGRAMS\${APP_NAME}\Get VB-CABLE A+B (call audio).url" "InternetShortcut" "URL" "https://vb-audio.com/Cable/"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
@@ -132,13 +166,32 @@ Section "VB-CABLE Virtual Audio Driver"
   ; builds this same script without it, and must keep succeeding, just
   ; without this section's behavior, rather than breaking the whole
   ; pipeline over a file that should never be checked in.
+  ; Already installed? VB-CABLE's own setup, when it finds an existing install, offers to REMOVE the driver instead
+  ; (per VB-Audio's reference manual), so never run it on a machine that already has it. Detection: the driver's
+  ; Uninstall key (confirmed present on a machine with VB-CABLE installed: "VB:VBCABLE {87459874-1236-4469}").
+  StrCpy $1 ""
+  SetRegView 64
+  ReadRegStr $1 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VB:VBCABLE {87459874-1236-4469}" "DisplayName"
+  ${If} $1 == ""
+    SetRegView 32
+    ReadRegStr $1 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VB:VBCABLE {87459874-1236-4469}" "DisplayName"
+  ${EndIf}
+  SetRegView 32
+  ${If} $1 != ""
+    DetailPrint "VB-CABLE is already installed - skipping the driver step."
+    Goto skip_vbcable
+  ${EndIf}
+
   SetOutPath "$TEMP"
   File /nonfatal "${VBCABLE_INSTALLER}"
 
   IfFileExists "$TEMP\VBCABLE_Setup_x64.exe" 0 skip_vbcable
     DetailPrint "Launching the VB-CABLE driver installer - click Install Driver in the window that opens (it will show its own admin prompt)..."
-    ExecWait "$TEMP\VBCABLE_Setup_x64.exe" $0
-    DetailPrint "VB-CABLE installer closed (exit code $0)."
+    ; This installer is not elevated, and ExecWait cannot start a program that needs admin (error 740), so launch it
+    ; with the "runas" verb: Windows shows the UAC prompt just for this step, and ExecShellWait waits for it to close
+    ; (it reports no exit code).
+    ExecShellWait "runas" "$TEMP\VBCABLE_Setup_x64.exe" "${VBCABLE_ARGS}" SW_SHOWNORMAL
+    DetailPrint "VB-CABLE installer closed."
     Delete "$TEMP\VBCABLE_Setup_x64.exe"
 
     ; VB-Audio's own documentation recommends a reboot for the driver to
@@ -168,6 +221,10 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\Get VB-CABLE A+B (call audio).url"
+
+  ; The app's optional "Start with Windows" setting writes this value (HKCU Run).
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}"
 
   DeleteRegKey HKCU "${UNINSTALL_REG_KEY}"
 SectionEnd

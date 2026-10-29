@@ -20,19 +20,21 @@
 use crate::setup::CompatibilityReport;
 use crate::settings::Settings;
 use crate::shared::{
-    studio_preset_from_index, studio_preset_name, studio_preset_to_index, DeviceList, DeviceOption,
+    studio_preset_to_index, DeviceList, DeviceOption,
     EngineHandles, STUDIO_PRESET_NAMES,
 };
 use crate::status_ui::{status_color, status_label};
 use dsp_core::{classify_status, compute_percentiles, RealtimeStatus};
-use enrollment::EnrollmentState;
 use tse_engine::BvcBackend;
-use iced::widget::{button, column, container, pick_list, progress_bar, row, scrollable, text, toggler};
-use iced::{Color, Element, Length, Subscription};
+use crate::ui_logic::Tab;
+use iced::widget::{button, column, container, pick_list, row, scrollable, text};
+use iced::{Color, Element, Subscription};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+mod tabs;
 
 /// Frame deadline in nanoseconds (10ms @ 48kHz), matching `dsp_core`'s frame
 /// config - duplicated here (rather than importing a private constant) since
@@ -73,7 +75,9 @@ struct MainState {
     devices: DeviceList,
     warnings: Vec<String>,
     status: RealtimeStatus,
+    /// Post-chain peak ("After") and raw mic peak ("Before"), refreshed every Tick.
     level: f32,
+    input_level: f32,
     _keepalive: Option<Box<dyn std::any::Any + Send>>,
     device_switch_seqs: Arc<DeviceSwitchSequences>,
     /// Live drop/underrun telemetry, refreshed every `Message::Tick` from
@@ -102,20 +106,57 @@ struct MainState {
     /// appears and disappears every couple of seconds would be more
     /// annoying than useful.
     show_low_cpu_suggestion: bool,
-    /// Point-in-time copy of `handles.enrollment.state()`, refreshed every
-    /// `Message::Tick` - same "snapshot into plain state, view stays a pure
-    /// function of `MainState`" pattern as `status`/`level`/
-    /// `io_counters_snapshot` above.
-    enrollment_state: enrollment::EnrollmentState,
-    /// The in-progress (or just-finished) "Play Recording" playback, if
-    /// any - `None` before the first click, or once the user has moved
-    /// past it (a new recording, clearing the profile). Read directly in
-    /// `view_main` via its own cheap atomic-load methods
-    /// (`PlaybackHandle::status`/`progress`), not snapshotted into a
-    /// separate field the way `enrollment_state` is - the same "read the
-    /// cheap thing directly" pattern `target_speaker_store.has_profile()`
-    /// already uses elsewhere in this same view.
-    playback: Option<crate::shared::PlaybackHandle>,
+    /// Selected tab of the full window. Not persisted (always opens on Home).
+    tab: Tab,
+    /// Transcript tab: the search box text and the result line of the last Export / Open folder / Copy.
+    transcript_query: String,
+    transcript_note: Option<String>,
+    /// Advanced tab: result line of Export logs / Start with Windows / Reset, and whether the next Reset click
+    /// is the confirming one (cleared when the tab changes).
+    diag_note: Option<String>,
+    reset_armed: bool,
+    cpu: crate::sysutil::CpuSampler,
+    cpu_percent: Option<f32>,
+    /// Problems to show as a banner (every tab and the collapsed bar); `logged_alerts` remembers which keys were
+    /// already written to the log so each problem is logged once when it appears and once when it clears.
+    alerts: Vec<crate::ui_logic::Alert>,
+    logged_alerts: Vec<&'static str>,
+}
+
+impl MainState {
+    fn new(
+        settings: Settings,
+        handles: EngineHandles,
+        devices: DeviceList,
+        warnings: Vec<String>,
+        keepalive: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Self {
+        Self {
+            settings,
+            handles,
+            devices,
+            warnings,
+            status: RealtimeStatus::Bypass,
+            level: 0.0,
+            input_level: 0.0,
+            _keepalive: keepalive,
+            device_switch_seqs: Arc::new(DeviceSwitchSequences::default()),
+            io_counters_snapshot: IoCountersSnapshot::default(),
+            speaker_status: RealtimeStatus::Bypass,
+            speaker_io_counters_snapshot: IoCountersSnapshot::default(),
+            consecutive_overloaded_ticks: 0,
+            show_low_cpu_suggestion: false,
+            tab: Tab::Home,
+            transcript_query: String::new(),
+            transcript_note: None,
+            diag_note: None,
+            reset_armed: false,
+            cpu: crate::sysutil::CpuSampler::new(),
+            cpu_percent: None,
+            alerts: Vec::new(),
+            logged_alerts: Vec::new(),
+        }
+    }
 }
 
 /// See `MainState::consecutive_overloaded_ticks`'s docs. At the ~250ms tick
@@ -193,6 +234,8 @@ pub enum Message {
     /// "Voice Gate (suppress quiet background voices)" toggled - see
     /// `dsp_core::VoiceGateStage`'s docs.
     ToggleMicVoiceGate(bool),
+    /// Echo cancellation (call audio from the speakers removed from the mic).
+    ToggleEchoCancel(bool),
     ToggleMicStudio(bool),
     SelectMicStudioPreset(&'static str),
     /// Accent conversion on/off - its own switch, independent of BVC.
@@ -220,59 +263,10 @@ pub enum Message {
     EnableLowCpuMode,
     /// Setup screen: "Continue" / "Continue anyway" clicked.
     ContinueFromSetup,
-    /// Picks the BVC backend - Off/Hush/TSE (see `tse_engine::BvcBackend`).
-    /// Selecting TSE is always allowed in the picker (its option is present,
-    /// not hidden), but is shown as unavailable when `handles.tse_available`
-    /// is `false` - matching how BVC itself already handles an unavailable
-    /// backend (disabled toggle + reason text, never a silently-missing
-    /// option).
+    /// Picks the BVC backend - Off/Hush/DeepFilterNet/Hush-bpo_v1 (see
+    /// `tse_engine::BvcBackend`). An unavailable backend is still shown in
+    /// the picker, with a reason line (never a silently-missing option).
     SelectBvcBackend(&'static str),
-    /// "Record Voice Reference" clicked.
-    StartEnrollment,
-    /// "Stop recording" clicked (manual stop, alongside the automatic
-    /// silence-based and max-duration stops `enrollment::EnrollmentSession`
-    /// already handles on its own).
-    StopEnrollment,
-    /// "Re-record Reference" clicked - identical to `StartEnrollment`
-    /// (starting a new recording naturally supersedes/replaces whatever was
-    /// enrolled before once it succeeds), kept as its own message only so
-    /// the GUI can offer a differently-labeled button once already enrolled.
-    RestartEnrollment,
-    /// "Clear Reference" clicked.
-    ClearEnrollment,
-    /// "Play Recording" clicked - plays back the most recent recording
-    /// attempt's raw audio through the default playback device, so the
-    /// user can hear exactly what was captured (see
-    /// `enrollment::EnrollmentSession::last_recording`'s docs). Available
-    /// even if that attempt was rejected/failed, not just after a
-    /// successful enrollment - hearing a bad recording is exactly what
-    /// helps diagnose why it was bad.
-    PlayLastRecording,
-    /// "Play Denoised" clicked - plays back the same recording run through
-    /// the same RNNoise pass real enrollment applies before extracting a
-    /// voice embedding (see
-    /// `enrollment::EnrollmentSession::last_recording_denoised`'s docs),
-    /// so the user can directly A/B it against the raw "Play Recording"
-    /// version rather than trusting the denoising step blindly.
-    PlayDenoisedRecording,
-    /// "Test with TSE" clicked - runs the most recent recording through a
-    /// real TSE backend OFFLINE (see `shared::run_tse_offline`'s docs on why
-    /// this is the only way to hear full-quality, non-glitchy TSE output
-    /// today, since the live real-time pipeline's `WatchdogStage` only
-    /// bounds the *damage* of TSE currently running far slower than real
-    /// time, not the slowness itself). Runs on a background thread
-    /// (`shared::TseOfflineTest`) since this can legitimately take tens of
-    /// seconds; `Message::Tick` picks up the result once ready.
-    TestWithTse,
-    /// "Pause"/"Resume" clicked during an active "Play Recording" playback.
-    PausePlayback,
-    ResumePlayback,
-    /// "Stop" clicked during an active "Play Recording" playback.
-    StopPlayback,
-    /// Picks which output device "Play Recording" uses - see
-    /// `Settings::recording_playback_device_id`'s docs on why this is
-    /// remembered for the next click rather than driving a live switch.
-    SelectPlaybackDevice(DeviceOption),
     /// Speaker-outbound (Pipeline 2) messages - see `tse_engine::SpeakerBvcBackend`'s
     /// docs on why this path's BVC picker is a smaller, separate enum from
     /// the mic path's.
@@ -282,13 +276,40 @@ pub enum Message {
     SelectSpeakerBvcBackend(&'static str),
     SelectSpeakerSource(DeviceOption),
     SelectRealSpeakerOutput(DeviceOption),
-    /// Master mute for the whole mic pipeline - see
-    /// `EngineHandles::mic_master_enabled`'s docs: unlike the individual
-    /// Noise/BVC/Studio toggles, this genuinely silences the output rather
-    /// than just skipping DSP processing.
-    ToggleMicMasterEnabled(bool),
-    /// Same as `ToggleMicMasterEnabled`, for the speaker path.
     ToggleSpeakerMasterEnabled(bool),
+    /// Switches between the full window and the compact always-on-top bar (persisted).
+    ToggleCompact,
+    SelectTab(Tab),
+    /// Mute / unmute the mic path (flips `EngineHandles::mic_master_enabled`); also driven by Ctrl+Shift+M.
+    ToggleMute,
+    /// "Background voices" on/off without changing which backend is selected (see `update_main`).
+    ToggleMicBvc(bool),
+    /// Applies one of `ui_logic::PROFILES` through the individual control handlers.
+    SelectProfile(&'static str),
+    TranscriptSearch(String),
+    CopyTranscript,
+    ExportTranscript,
+    OpenTranscriptFolder,
+    ToggleDarkTheme(bool),
+    ToggleStartWithWindows(bool),
+    /// "Minimize to tray" on/off (handled in `update`: it also starts/stops the tray icon).
+    ToggleMinimizeToTray(bool),
+    ExportLogs,
+    /// First click arms, second click (without changing tab) resets processing settings to their defaults.
+    ResetDefaults,
+    /// Opens VB-Audio's page for the second virtual cable (call audio).
+    OpenInstallGuide,
+}
+
+const FULL_WINDOW_SIZE: iced::Size = iced::Size::new(560.0, 720.0);
+const COMPACT_WINDOW_SIZE: iced::Size = iced::Size::new(400.0, 250.0);
+
+fn window_size_and_level(compact: bool) -> (iced::Size, iced::window::Level) {
+    if compact {
+        (COMPACT_WINDOW_SIZE, iced::window::Level::AlwaysOnTop)
+    } else {
+        (FULL_WINDOW_SIZE, iced::window::Level::Normal)
+    }
 }
 
 fn persist(settings: &Settings) {
@@ -342,24 +363,104 @@ fn next_seq(seq: &AtomicU64) -> u64 {
 /// Top-level dispatch: routes to whichever screen is currently active, and
 /// handles the one-way `Setup -> Main` transition when `update_setup`
 /// reports the user is done with the setup screen.
-fn update(screen: &mut Screen, message: Message) {
+fn update(screen: &mut Screen, message: Message) -> iced::Task<Message> {
+    if let Message::ToggleMinimizeToTray(on) = message {
+        if let Screen::Main(state) = screen {
+            state.settings.minimize_to_tray = on;
+            persist(&state.settings);
+            if on {
+                crate::tray::start();
+            } else {
+                crate::tray::stop();
+            }
+        }
+        return iced::Task::none();
+    }
+    // With "Minimize to tray" on, closing the window hides it (the process and the audio keep running); the tray's
+    // Open / Quit bring it back / end the app.
+    if matches!(message, Message::WindowClosed) {
+        if let Screen::Main(state) = screen {
+            if state.settings.minimize_to_tray {
+                crate::tray::start();
+                return iced::window::latest().and_then(|id| iced::window::set_mode(id, iced::window::Mode::Hidden));
+            }
+        }
+    }
+    // Tray menu / icon clicks, polled with the regular tick (like the mute hotkey).
+    if matches!(message, Message::Tick) {
+        if let Screen::Main(state) = screen {
+            let mut tasks = Vec::new();
+            for action in crate::tray::take_actions() {
+                match action {
+                    crate::tray::TrayAction::Open => tasks.push(iced::window::latest().and_then(|id| {
+                        iced::Task::batch([
+                            iced::window::set_mode(id, iced::window::Mode::Windowed),
+                            iced::window::minimize(id, false),
+                            iced::window::gain_focus(id),
+                        ])
+                    })),
+                    crate::tray::TrayAction::ToggleMute => update_main(state, Message::ToggleMute),
+                    crate::tray::TrayAction::Quit => terminate_process(),
+                }
+            }
+            update_main(state, message);
+            return iced::Task::batch(tasks);
+        }
+    }
+    if matches!(message, Message::ToggleCompact) {
+        if let Screen::Main(state) = screen {
+            state.settings.compact_mode = !state.settings.compact_mode;
+            persist(&state.settings);
+            let (size, level) = window_size_and_level(state.settings.compact_mode);
+            return iced::window::latest().and_then(move |id| {
+                iced::Task::batch([iced::window::resize(id, size), iced::window::set_level(id, level)])
+            });
+        }
+        return iced::Task::none();
+    }
+    if matches!(message, Message::CopyTranscript) {
+        if let Screen::Main(state) = screen {
+            let (lines, _) = state.handles.transcript.snapshot(10_000);
+            let all: Vec<(u32, String)> = lines.iter().map(|l| (l.at_secs, l.text.clone())).collect();
+            let shown: Vec<(u32, String)> =
+                crate::ui_logic::filter_lines(&all, &state.transcript_query).into_iter().cloned().collect();
+            state.transcript_note = Some(if shown.is_empty() {
+                "Nothing to copy yet.".to_string()
+            } else {
+                format!("Copied {} line(s) to the clipboard.", shown.len())
+            });
+            if !shown.is_empty() {
+                return iced::clipboard::write(crate::ui_logic::format_transcript(&shown));
+            }
+        }
+        return iced::Task::none();
+    }
+    update_inner(screen, message);
+    iced::Task::none()
+}
+
+/// Ends the app at once. Letting iced unwind normally drops the audio engine, whose capture/render drops join their
+/// threads; a thread stuck on an invalid device (or a model run) then leaves a hung "Not responding" clearnairt.exe in
+/// the background. Settings are saved when changed.
+fn terminate_process() -> ! {
+    #[cfg(windows)]
+    {
+        // ExitProcess runs DLL detach for onnxruntime/audio libraries, which was observed to spin and hang;
+        // TerminateProcess ends the process immediately.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn TerminateProcess(h: isize, code: u32) -> i32;
+        }
+        unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+    }
+    std::process::exit(0);
+}
+
+fn update_inner(screen: &mut Screen, message: Message) {
     if matches!(message, Message::WindowClosed) {
         crate::log_error!("[clearnairt] window close requested - terminating process");
-        // Closing the window must end the app. Letting iced unwind normally drops the audio engine, whose
-        // capture/render drops join their threads; a thread stuck on an invalid device (or a model run) then
-        // leaves a hung "Not responding" clearnairt.exe in the background. Settings are saved when changed.
-        #[cfg(windows)]
-        {
-            // ExitProcess runs DLL detach for onnxruntime/audio libraries, which was observed to spin and hang;
-            // TerminateProcess ends the process immediately.
-            #[link(name = "kernel32")]
-            extern "system" {
-                fn GetCurrentProcess() -> isize;
-                fn TerminateProcess(h: isize, code: u32) -> i32;
-            }
-            unsafe { TerminateProcess(GetCurrentProcess(), 0) };
-        }
-        std::process::exit(0);
+        terminate_process();
     }
     let transition = match screen {
         Screen::Main(state) => {
@@ -391,23 +492,13 @@ fn update_setup(setup: &mut SetupState, message: Message) -> Option<MainState> {
             // already-acknowledged one.
             setup.settings.setup_acknowledged = true;
             persist(&setup.settings);
-            Some(MainState {
-                settings: setup.settings.clone(),
-                handles: setup.handles.clone(),
-                devices: setup.devices.clone(),
-                warnings: setup.warnings.clone(),
-                status: RealtimeStatus::Bypass,
-                level: 0.0,
-                _keepalive: setup.keepalive.take(),
-                device_switch_seqs: Arc::new(DeviceSwitchSequences::default()),
-                io_counters_snapshot: IoCountersSnapshot::default(),
-                speaker_status: RealtimeStatus::Bypass,
-                speaker_io_counters_snapshot: IoCountersSnapshot::default(),
-                consecutive_overloaded_ticks: 0,
-                show_low_cpu_suggestion: false,
-                enrollment_state: enrollment::EnrollmentState::Idle,
-                playback: None,
-            })
+            Some(MainState::new(
+                setup.settings.clone(),
+                setup.handles.clone(),
+                setup.devices.clone(),
+                setup.warnings.clone(),
+                setup.keepalive.take(),
+            ))
         }
         // Every other message is a Main-screen-only toggle/picker action;
         // the setup screen's `view` never emits these, so this is
@@ -416,9 +507,57 @@ fn update_setup(setup: &mut SetupState, message: Message) -> Option<MainState> {
     }
 }
 
+/// Rebuilds `state.alerts` from the live engine status and logs each problem once when it appears (and once when
+/// it clears), so the log and the window always tell the same story.
+fn refresh_alerts(state: &mut MainState) {
+    use accent_onnx::pipeline::AccentState;
+    let h = &state.handles;
+    let mut input = crate::ui_logic::AlertInput::default();
+    if state.settings.accent_on {
+        let st = h.accent.status();
+        match st.state {
+            AccentState::Paused => input.accent_paused_rtf = Some(st.rtf),
+            AccentState::Unavailable => input.accent_unavailable = Some(st.message),
+            _ => {}
+        }
+    }
+    if h.mic_bvc.is_on() {
+        match BvcBackend::from_index(h.bvc_backend.load()) {
+            BvcBackend::Hush => {
+                input.bvc_unavailable = !h.mic_bvc_available;
+                input.bvc_stopped = h.mic_hush_status.as_ref().is_some_and(|s| s.is_bypassed());
+            }
+            BvcBackend::HushBpoV1 => {
+                input.bvc_unavailable = !h.mic_bpo_v1_available;
+                input.bvc_stopped = h.mic_bpo_v1_status.as_ref().is_some_and(|s| s.is_bypassed());
+            }
+            BvcBackend::DeepFilter => input.bvc_unavailable = !h.mic_deep_filter_available,
+            BvcBackend::Off => {}
+        }
+    }
+    input.cpu_struggling = state.show_low_cpu_suggestion;
+    let alerts = crate::ui_logic::alerts(&input);
+    for a in &alerts {
+        if !state.logged_alerts.contains(&a.key) {
+            crate::log_error!("[clearnairt] ALERT: {}", a.text);
+            state.logged_alerts.push(a.key);
+        }
+    }
+    let still: Vec<&'static str> = alerts.iter().map(|a| a.key).collect();
+    state.logged_alerts.retain(|k| {
+        let keep = still.contains(k);
+        if !keep {
+            crate::log_info!("[clearnairt] ALERT cleared: {k}");
+        }
+        keep
+    });
+    state.alerts = alerts;
+}
+
 fn update_main(state: &mut MainState, message: Message) {
     match message {
         Message::Tick => {
+            refresh_alerts(state);
             let snapshot = state.handles.latency_log.snapshot();
             let percentiles = compute_percentiles(snapshot);
             // "Bypass" here means every mic-path DSP stage is currently
@@ -431,6 +570,7 @@ fn update_main(state: &mut MainState, message: Message) {
                 && !state.handles.mic_studio.is_on();
             state.status = classify_status(&percentiles, DEADLINE_NS, all_off);
             state.level = state.handles.level.load();
+            state.input_level = state.handles.input_level.load();
             state.io_counters_snapshot = IoCountersSnapshot::read(&state.handles.counters);
 
             let speaker_snapshot = state.handles.speaker_latency_log.snapshot();
@@ -440,8 +580,6 @@ fn update_main(state: &mut MainState, message: Message) {
                 && !state.handles.speaker_studio.is_on();
             state.speaker_status = classify_status(&speaker_percentiles, DEADLINE_NS, speaker_all_off);
             state.speaker_io_counters_snapshot = IoCountersSnapshot::read(&state.handles.speaker_counters);
-
-            state.enrollment_state = state.handles.enrollment.state();
 
             // Either pipeline being overloaded counts - a user hitting
             // Overloaded on the SPEAKER path deserves the same suggestion
@@ -455,12 +593,94 @@ fn update_main(state: &mut MainState, message: Message) {
             if state.consecutive_overloaded_ticks >= LOW_CPU_SUGGESTION_THRESHOLD_TICKS {
                 state.show_low_cpu_suggestion = true;
             }
-
-            if let Some(handle) = state.handles.tse_offline_test.take_ready_playback() {
-                state.playback = Some(handle);
+            if let Some(p) = state.cpu.sample() {
+                state.cpu_percent = Some(p);
             }
-            if let Some(err) = state.handles.tse_offline_test.take_error() {
-                crate::log_error!("[clearnairt] TSE offline test run failed: {err}");
+            if crate::sysutil::take_hotkey_pressed() {
+                update_main(state, Message::ToggleMute);
+            }
+        }
+        Message::SelectTab(tab) => {
+            state.tab = tab;
+            state.reset_armed = false;
+        }
+        Message::ToggleMute => {
+            let on = state.handles.mic_master_enabled.is_on();
+            state.handles.mic_master_enabled.set(!on);
+        }
+        Message::ToggleMicBvc(on) => {
+            if on {
+                // Turning voices on with no backend selected picks Hush; otherwise keep the user's chosen backend.
+                let backend = BvcBackend::from_index(state.handles.bvc_backend.load());
+                let name = if backend == BvcBackend::Off { BvcBackend::Hush.name() } else { backend.name() };
+                update_main(state, Message::SelectBvcBackend(name));
+            } else {
+                state.handles.mic_bvc.set(false);
+                state.settings.mic_bvc_on = false;
+                persist(&state.settings);
+            }
+        }
+        Message::SelectProfile(name) => {
+            if let Some(p) = crate::ui_logic::profile_by_name(name) {
+                update_main(state, Message::ToggleMicNoise(p.noise));
+                update_main(state, Message::ToggleMicVoiceGate(p.voice_gate));
+                update_main(state, Message::ToggleMicStudio(p.studio));
+                update_main(state, Message::SelectMicStudioPreset(p.studio_preset));
+                update_main(state, Message::SelectBvcBackend(p.bvc_backend));
+                state.settings.profile = p.name.to_string();
+                persist(&state.settings);
+            }
+        }
+        Message::OpenInstallGuide => {
+            if let Err(e) = crate::sysutil::open_url("https://vb-audio.com/Cable/") {
+                crate::log_error!("[clearnairt] {e}");
+            }
+        }
+        Message::TranscriptSearch(query) => state.transcript_query = query,
+        Message::ExportTranscript => {
+            let (lines, _) = state.handles.transcript.snapshot(10_000);
+            let all: Vec<(u32, String)> = lines.iter().map(|l| (l.at_secs, l.text.clone())).collect();
+            let shown: Vec<(u32, String)> =
+                crate::ui_logic::filter_lines(&all, &state.transcript_query).into_iter().cloned().collect();
+            let dir = crate::setup::app_data_dir().join("transcripts");
+            state.transcript_note = Some(if shown.is_empty() {
+                "Nothing to export yet.".to_string()
+            } else {
+                match crate::sysutil::export_text(&dir, &crate::ui_logic::format_transcript(&shown)) {
+                    Ok(path) => format!("Exported to {}", path.display()),
+                    Err(e) => e,
+                }
+            });
+        }
+        Message::OpenTranscriptFolder => {
+            let dir = crate::setup::app_data_dir().join("transcripts");
+            state.transcript_note = crate::sysutil::open_folder(&dir).err();
+        }
+        Message::ToggleDarkTheme(on) => {
+            state.settings.theme_dark = on;
+            persist(&state.settings);
+        }
+        Message::ToggleStartWithWindows(on) => match crate::sysutil::set_autostart(on) {
+            Ok(()) => {
+                state.settings.start_with_windows = on;
+                state.diag_note = None;
+                persist(&state.settings);
+            }
+            Err(e) => state.diag_note = Some(e),
+        },
+        Message::ExportLogs => {
+            let app_dir = crate::setup::app_data_dir();
+            let dest_dir = crate::sysutil::export_dir(&app_dir);
+            state.diag_note = Some(match crate::sysutil::export_log(&app_dir.join("clearnai.log"), &dest_dir) {
+                Ok(path) => format!("Log exported to {}", path.display()),
+                Err(e) => e,
+            });
+        }
+        Message::ResetDefaults => {
+            if !state.reset_armed {
+                state.reset_armed = true;
+            } else {
+                reset_to_defaults(state);
             }
         }
         Message::ToggleMicNoise(on) => {
@@ -471,6 +691,11 @@ fn update_main(state: &mut MainState, message: Message) {
         Message::ToggleMicVoiceGate(on) => {
             state.handles.mic_voice_gate.set(on);
             state.settings.mic_voice_gate_on = on;
+            persist(&state.settings);
+        }
+        Message::ToggleEchoCancel(on) => {
+            state.handles.echo_cancel.set(on);
+            state.settings.echo_cancel_on = on;
             persist(&state.settings);
         }
         Message::ToggleMicStudio(on) => {
@@ -582,11 +807,6 @@ fn update_main(state: &mut MainState, message: Message) {
             state.show_low_cpu_suggestion = false;
             state.consecutive_overloaded_ticks = 0;
         }
-        Message::ToggleMicMasterEnabled(on) => {
-            // Not persisted - a runtime-only mute (see `EngineHandles::
-            // mic_master_enabled`'s docs), always starts back on at launch.
-            state.handles.mic_master_enabled.set(on);
-        }
         Message::ToggleSpeakerMasterEnabled(on) => {
             state.handles.speaker_master_enabled.set(on);
         }
@@ -596,15 +816,13 @@ fn update_main(state: &mut MainState, message: Message) {
                 let wants_on = backend != BvcBackend::Off;
                 // Same "never silently enable an unavailable backend"
                 // rule `ToggleMicBvc` already enforces for Hush, extended
-                // to TSE: picking a backend whose real implementation
-                // couldn't be loaded/isn't integrated leaves the actual
+                // to every backend: picking one whose real implementation
+                // couldn't be loaded leaves the actual
                 // gate off, even though the *selection* is remembered.
                 let available = match backend {
                     BvcBackend::Off => true,
                     BvcBackend::Hush => state.handles.mic_bvc_available,
-                    BvcBackend::Tse => state.handles.tse_available,
                     BvcBackend::DeepFilter => state.handles.mic_deep_filter_available,
-                    BvcBackend::Vanta => state.handles.mic_vanta_available,
                     BvcBackend::HushBpoV1 => state.handles.mic_bpo_v1_available,
                 };
                 state.handles.bvc_backend.store(index);
@@ -673,65 +891,60 @@ fn update_main(state: &mut MainState, message: Message) {
                 s.set_real_speaker_output(Some(device.id))
             });
         }
-        Message::StartEnrollment | Message::RestartEnrollment => {
-            state.handles.enrollment.start_recording(dsp_core::SAMPLE_RATE_HZ);
-            state.enrollment_state = state.handles.enrollment.state();
-        }
-        Message::StopEnrollment => {
-            state.handles.enrollment.stop_recording();
-        }
-        Message::ClearEnrollment => {
-            state.handles.enrollment.clear_profile();
-            state.enrollment_state = state.handles.enrollment.state();
-        }
-        Message::PlayLastRecording => {
-            if let Some((samples, _sample_rate_hz)) = state.handles.enrollment.last_recording() {
-                let device_id = state.settings.recording_playback_device_id.clone();
-                state.playback = Some(crate::shared::play_recorded_audio(samples, device_id));
-            }
-        }
-        Message::PlayDenoisedRecording => {
-            if let Some((samples, _sample_rate_hz)) = state.handles.enrollment.last_recording_denoised() {
-                let device_id = state.settings.recording_playback_device_id.clone();
-                state.playback = Some(crate::shared::play_recorded_audio(samples, device_id));
-            }
-        }
-        Message::TestWithTse => {
-            if let (Some((samples, _sample_rate_hz)), Some(profile)) =
-                (state.handles.enrollment.last_recording(), state.handles.tse_speaker_store.get_profile())
-            {
-                let device_id = state.settings.recording_playback_device_id.clone();
-                state.handles.tse_offline_test.start(samples, profile, device_id);
-            }
-        }
-        Message::SelectPlaybackDevice(device) => {
-            // Not a live-switching device the way `SelectMonitorDevice` is
-            // (no continuously-running stream to redirect) - just
-            // remembered for the next "Play Recording" click, see
-            // `Settings::recording_playback_device_id`'s docs.
-            state.settings.recording_playback_device_id = Some(device.id);
-            persist(&state.settings);
-        }
-        Message::PausePlayback => {
-            if let Some(playback) = &state.playback {
-                playback.pause();
-            }
-        }
-        Message::ResumePlayback => {
-            if let Some(playback) = &state.playback {
-                playback.resume();
-            }
-        }
-        Message::StopPlayback => {
-            if let Some(playback) = &state.playback {
-                playback.stop();
-            }
-        }
         // Setup-screen-only messages; unreachable once `Screen::Main` is
         // active (its `view` never emits them), same reasoning as the
         // catch-all in `update_setup`.
-        Message::ContinueFromSetup | Message::WindowClosed => {}
+        Message::ContinueFromSetup
+        | Message::WindowClosed
+        | Message::ToggleCompact
+        | Message::CopyTranscript
+        | Message::ToggleMinimizeToTray(_) => {}
     }
+}
+
+/// "Reset to defaults": puts every processing option back to `Settings::default()` live, through the same handlers
+/// the controls use. Device choices, the setup acknowledgement and the window preferences (compact, theme) are kept
+/// so a reset never breaks the virtual-cable setup.
+fn reset_to_defaults(state: &mut MainState) {
+    let d = Settings::default();
+    let keep = state.settings.clone();
+    let mut fresh = d.clone();
+    fresh.virtual_mic_target_id = keep.virtual_mic_target_id;
+    fresh.virtual_speaker_source_id = keep.virtual_speaker_source_id;
+    fresh.physical_mic_device_id = keep.physical_mic_device_id;
+    fresh.monitor_device_id = keep.monitor_device_id;
+    fresh.real_speaker_output_device_id = keep.real_speaker_output_device_id;
+    fresh.setup_acknowledged = keep.setup_acknowledged;
+    fresh.compact_mode = keep.compact_mode;
+    fresh.minimize_to_tray = keep.minimize_to_tray;
+    fresh.theme_dark = keep.theme_dark;
+    state.settings = fresh;
+    state.handles.mic_master_enabled.set(true);
+    state.handles.speaker_master_enabled.set(true);
+    let preset = |i: u8| STUDIO_PRESET_NAMES[(i as usize).min(STUDIO_PRESET_NAMES.len() - 1)];
+    update_main(state, Message::ToggleMicNoise(d.mic_noise_on));
+    update_main(state, Message::ToggleMicVoiceGate(d.mic_voice_gate_on));
+    update_main(state, Message::ToggleEchoCancel(d.echo_cancel_on));
+    update_main(state, Message::ToggleMicStudio(d.mic_studio_on));
+    update_main(state, Message::SelectMicStudioPreset(preset(d.mic_studio_preset)));
+    update_main(state, Message::SelectBvcBackend(BvcBackend::from_index(d.mic_bvc_backend).name()));
+    update_main(state, Message::ToggleAccent(d.accent_on));
+    update_main(state, Message::SelectAccentVoice(accent_onnx::VOICE_CHOICES[(d.accent_voice_index() - 1) as usize]));
+    update_main(state, Message::ToggleTranscript(d.transcript_on));
+    update_main(state, Message::ToggleMonitor(d.monitor_enabled));
+    update_main(state, Message::ToggleSpeakerNoise(d.speaker_noise_on));
+    update_main(state, Message::ToggleSpeakerStudio(d.speaker_studio_on));
+    update_main(state, Message::SelectSpeakerStudioPreset(preset(d.speaker_studio_preset)));
+    update_main(
+        state,
+        Message::SelectSpeakerBvcBackend(tse_engine::SpeakerBvcBackend::from_index(d.speaker_bvc_backend).name()),
+    );
+    state.reset_armed = false;
+    state.diag_note = Some(match crate::sysutil::set_autostart(false) {
+        Ok(()) => "Settings reset to defaults. Your device choices were kept.".to_string(),
+        Err(e) => format!("Settings reset to defaults, but {e}"),
+    });
+    persist(&state.settings);
 }
 
 /// Maps a `pick_list`'s selected label back to `tse_engine::BvcBackend` -
@@ -747,204 +960,35 @@ fn speaker_bvc_backend_from_name(name: &str) -> Option<tse_engine::SpeakerBvcBac
     tse_engine::SpeakerBvcBackend::ALL.into_iter().find(|b| b.name() == name)
 }
 
-fn status_row(state: &MainState) -> Element<'_, Message> {
-    let color = status_color(state.status);
-    let dot = container(text("●").size(20).color(Color::from_rgb(color.r, color.g, color.b)));
-    let label = text(format!("Engine: {}", status_label(state.status))).size(16);
-    let level_bar = progress_bar(0.0..=1.0, state.level.clamp(0.0, 1.0)).girth(Length::Fixed(10.0));
-
-    // Real, live counts (not a guess from watching logs scroll by) - see
-    // `IoCountersSnapshot`. Colored amber once any drop/underrun has ever
-    // happened this session, so a perfectly healthy run stays visually
-    // quiet (plain grey text) instead of drawing the eye to a "0" that
-    // doesn't need attention.
-    let io = state.io_counters_snapshot;
-    let has_issues = io.dropped_frames > 0 || io.input_overruns > 0 || io.output_underruns > 0;
-    let io_color = if has_issues {
-        Color::from_rgb(0.90, 0.75, 0.15)
-    } else {
-        Color::from_rgb(0.55, 0.55, 0.55)
-    };
-    let io_row = text(format!(
-        "Dropped frames: {}  |  Input overruns: {}  |  Output underruns: {}",
-        io.dropped_frames, io.input_overruns, io.output_underruns
-    ))
-    .size(12)
-    .color(io_color);
-
-    column![
-        row![dot, label].spacing(8).align_y(iced::Alignment::Center),
-        row![text("Input level").size(12), level_bar].spacing(8).align_y(iced::Alignment::Center),
-        io_row,
-    ]
-    .spacing(4)
-    .into()
-}
-
 /// Same layout as `status_row`, for the speaker-outbound pipeline's own,
 /// independent telemetry (`speaker_status`/`speaker_io_counters_snapshot`)
 /// - no input-level meter here (that field only exists for the mic path).
 fn speaker_status_row(state: &MainState) -> Element<'_, Message> {
     let color = status_color(state.speaker_status);
     let dot = container(text("●").size(20).color(Color::from_rgb(color.r, color.g, color.b)));
-    let label = text(format!("Speaker pipeline: {}", status_label(state.speaker_status))).size(16);
+    let label = text(format!("Call audio: {}", status_label(state.speaker_status))).size(16);
 
     let io = state.speaker_io_counters_snapshot;
     let has_issues = io.dropped_frames > 0 || io.input_overruns > 0 || io.output_underruns > 0;
-    let io_color = if has_issues {
-        Color::from_rgb(0.90, 0.75, 0.15)
-    } else {
-        Color::from_rgb(0.55, 0.55, 0.55)
-    };
-    let io_row = text(format!(
-        "Dropped frames: {}  |  Input overruns: {}  |  Output underruns: {}",
-        io.dropped_frames, io.input_overruns, io.output_underruns
-    ))
-    .size(12)
-    .color(io_color);
-
-    column![
-        row![dot, label].spacing(8).align_y(iced::Alignment::Center),
-        io_row,
-    ]
-    .spacing(4)
-    .into()
+    // The raw counters live in Advanced > Diagnostics; here only say so when something actually went wrong.
+    let mut col = column![row![dot, label].spacing(8).align_y(iced::Alignment::Center)].spacing(4);
+    if has_issues {
+        col = col.push(text("Some audio was dropped. Details are in Advanced.").size(12).style(text::warning));
+    }
+    col.into()
 }
 
-/// The "Record Voice Reference" / target-speaker-enrollment section shown
-/// under the BVC backend picker - see this task's GUI mockup: a target-
-/// speaker indicator, the reference sentence, a record/re-record/clear
-/// button set, and a plain-language status line. Never exposes model
-/// internals (no embedding dimension, no encoder name) to the user - only
-/// `Ready`/`Recording`/`Processing`/`Error` - matching the task's "do not
-/// expose model internals to the user" requirement.
-fn enrollment_section(state: &MainState) -> Element<'_, Message> {
-    let enrolled = state.handles.target_speaker_store.has_profile();
-    let target_speaker_line = if enrolled {
-        text("Target Speaker: \u{2713} Enrolled").size(13).color(Color::from_rgb(0.20, 0.75, 0.30))
-    } else {
-        text("Target Speaker: Not enrolled").size(13)
-    };
-
-    let (status_text, status_color_rgb) = match &state.enrollment_state {
-        EnrollmentState::Idle => (
-            if enrolled { "Ready".to_string() } else { "Not started".to_string() },
-            Color::from_rgb(0.55, 0.55, 0.55),
-        ),
-        EnrollmentState::Preparing => ("Preparing...".to_string(), Color::from_rgb(0.55, 0.55, 0.55)),
-        EnrollmentState::Recording => ("Recording - speak the sentence below".to_string(), Color::from_rgb(0.20, 0.55, 0.85)),
-        EnrollmentState::Validating => ("Processing (checking recording quality)...".to_string(), Color::from_rgb(0.55, 0.55, 0.55)),
-        EnrollmentState::ExtractingEmbedding => ("Processing (analyzing voice)...".to_string(), Color::from_rgb(0.55, 0.55, 0.55)),
-        EnrollmentState::Ready => ("Enrolled".to_string(), Color::from_rgb(0.20, 0.75, 0.30)),
-        EnrollmentState::Failed(e) => (format!("Error: {e}"), Color::from_rgb(0.85, 0.2, 0.2)),
-    };
-
-    let in_progress = state.enrollment_state.is_in_progress();
-
-    let mut buttons = row![].spacing(8);
-    if in_progress {
-        buttons = buttons.push(button(text("Stop recording").size(13)).on_press(Message::StopEnrollment));
-    } else if enrolled {
-        buttons = buttons.push(button(text("Re-record Reference").size(13)).on_press(Message::RestartEnrollment));
-        buttons = buttons.push(button(text("Clear Reference").size(13)).on_press(Message::ClearEnrollment));
-    } else {
-        buttons = buttons.push(button(text("Record Voice Reference").size(13)).on_press(Message::StartEnrollment));
-    }
-    // Playback transport - shown whenever a recording exists, even a
-    // rejected/failed one (see `Message::PlayLastRecording`'s docs) - not
-    // gated on `enrolled` or `in_progress` the way the buttons above are,
-    // since "hear what I just recorded" is useful precisely when something
-    // went wrong. While a playback is actually running/paused, this
-    // replaces the single "Play Recording" button with Pause/Resume + Stop
-    // rather than allowing a second overlapping playback to start.
-    let playback_status = state.playback.as_ref().map(|p| p.status());
-    let mut playback_progress_row: Option<Element<'_, Message>> = None;
-    if !in_progress && state.handles.enrollment.has_last_recording() {
-        match playback_status {
-            Some(crate::shared::PlaybackStatus::Playing) => {
-                buttons = buttons.push(button(text("Pause").size(13)).on_press(Message::PausePlayback));
-                buttons = buttons.push(button(text("Stop").size(13)).on_press(Message::StopPlayback));
-                if let Some(p) = &state.playback {
-                    playback_progress_row = Some(
-                        row![
-                            text("Playing:").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)),
-                            progress_bar(0.0..=1.0, p.progress()).girth(Length::Fixed(8.0)),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Center)
-                        .into(),
-                    );
-                }
-            }
-            Some(crate::shared::PlaybackStatus::Paused) => {
-                buttons = buttons.push(button(text("Resume").size(13)).on_press(Message::ResumePlayback));
-                buttons = buttons.push(button(text("Stop").size(13)).on_press(Message::StopPlayback));
-                if let Some(p) = &state.playback {
-                    playback_progress_row = Some(
-                        row![
-                            text("Paused:").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)),
-                            progress_bar(0.0..=1.0, p.progress()).girth(Length::Fixed(8.0)),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Center)
-                        .into(),
-                    );
-                }
-            }
-            // No playback yet, or a previous one already finished/was
-            // stopped - offer to start a fresh one, either the raw
-            // capture or the same denoised version real enrollment
-            // extracts the voice embedding from (see
-            // `Message::PlayDenoisedRecording`'s docs) - both share this
-            // one transport (Pause/Resume/Stop), only one can play at a
-            // time.
-            None | Some(crate::shared::PlaybackStatus::Finished) | Some(crate::shared::PlaybackStatus::Stopped) => {
-                buttons = buttons.push(button(text("Play Recording").size(13)).on_press(Message::PlayLastRecording));
-                buttons = buttons.push(button(text("Play Denoised").size(13)).on_press(Message::PlayDenoisedRecording));
-                // Offline TSE test - see `Message::TestWithTse`'s docs on
-                // why this is the only way to hear full-quality TSE output
-                // today. Needs a TSE-specific (192-dim) enrolled embedding,
-                // not just the primary 256-dim one `enrolled` above checks.
-                if state.handles.tse_offline_test.is_in_progress() {
-                    buttons = buttons.push(
-                        text("Testing with TSE... (can take up to a minute)").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)),
-                    );
-                } else if state.handles.tse_speaker_store.has_profile() {
-                    buttons = buttons.push(button(text("Test with TSE").size(13)).on_press(Message::TestWithTse));
-                }
-            }
-        }
-    }
-
-    let mut section = column![target_speaker_line, buttons,];
-    if let Some(progress_row) = playback_progress_row {
-        section = section.push(progress_row);
-    }
-    // Shown whenever the playback feature is at all relevant (a recording
-    // to play back exists), not just while something is actively playing -
-    // this is the device the *next* click will use, per
-    // `Settings::recording_playback_device_id`'s docs.
-    if state.handles.enrollment.has_last_recording() {
-        section = section.push(device_picker(
-            "Playback device (for \"Play Recording\")",
-            &state.devices.render,
-            &state.settings.recording_playback_device_id,
-            Message::SelectPlaybackDevice,
-        ));
-    }
-
-    section
-    .push(text("Reference sentence:").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)))
-    .push(text(format!("\u{201C}{}\u{201D}", state.settings.reference_sentence)).size(13))
-    .push(
-        row![
-            text("Status:").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)),
-            text(status_text).size(12).color(status_color_rgb),
-        ]
-        .spacing(6),
-    )
-    .spacing(8)
-    .into()
+/// Same as `device_picker` for a list built on the fly (filtered to the sensible choices for this role).
+fn device_picker_of<'a>(
+    label: &'a str,
+    options: Vec<DeviceOption>,
+    selected_id: &Option<String>,
+    on_select: impl Fn(DeviceOption) -> Message + 'a,
+) -> Element<'a, Message> {
+    let selected = selected_id.as_ref().and_then(|id| options.iter().find(|d| &d.id == id).cloned());
+    column![text(label).size(14), pick_list(options, selected, on_select).placeholder("Not selected")]
+        .spacing(4)
+        .into()
 }
 
 fn device_picker<'a>(
@@ -958,456 +1002,29 @@ fn device_picker<'a>(
         .and_then(|id| options.iter().find(|d| &d.id == id).cloned());
     column![
         text(label).size(14),
-        pick_list(options, selected, on_select).placeholder("(not selected - applies immediately)"),
+        pick_list(options, selected, on_select).placeholder("Not selected"),
     ]
     .spacing(4)
     .into()
 }
 
 /// Every `tse_engine::BvcBackend` name, in `BvcBackend::ALL` order - a
-/// plain `[&'static str; 6]` so `pick_list` can borrow it the same way
+/// plain `[&'static str; 4]` so `pick_list` can borrow it the same way
 /// `STUDIO_PRESET_NAMES` already works for the Studio preset picker.
-const BVC_BACKEND_NAMES: [&str; 6] = [
+const BVC_BACKEND_NAMES: [&str; 4] = [
     BvcBackend::Off.name(),
     BvcBackend::Hush.name(),
     BvcBackend::DeepFilter.name(),
-    BvcBackend::Tse.name(),
-    BvcBackend::Vanta.name(),
     BvcBackend::HushBpoV1.name(),
 ];
 
 /// Same as `BVC_BACKEND_NAMES` but for the speaker path's smaller
-/// `SpeakerBvcBackend` enum - no TSE/Vanta (see that type's docs).
+/// `SpeakerBvcBackend` enum.
 const SPEAKER_BVC_BACKEND_NAMES: [&str; 3] = [
     tse_engine::SpeakerBvcBackend::Off.name(),
     tse_engine::SpeakerBvcBackend::Hush.name(),
     tse_engine::SpeakerBvcBackend::DeepFilter.name(),
 ];
-
-fn view_main(state: &MainState) -> Element<'_, Message> {
-    let selected_backend = BvcBackend::from_index(state.handles.bvc_backend.load());
-    let bvc_unavailable_note: Option<Element<'_, Message>> = match selected_backend {
-        BvcBackend::Hush if !state.handles.mic_bvc_available => Some(
-            text(format!(
-                "Hush is unavailable: {}",
-                state.handles.mic_bvc_unavailable_reason.as_deref().unwrap_or("weya_nc.dll not found")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        // Honest report of a real failure mode that otherwise looks
-        // identical to "Hush is on and working": the backend's own
-        // watchdog gave up on it after repeated stalls and has bypassed it
-        // for the rest of this session - see `EngineHandles::mic_hush_status`'s
-        // docs. Checked only once `mic_bvc_available` is already true
-        // (loaded fine at startup, failed later), so it never overlaps with
-        // the arm above.
-        BvcBackend::Hush if state.handles.mic_hush_status.as_ref().is_some_and(|s| s.is_bypassed()) => Some(
-            text(
-                "Hush stopped responding and has been bypassed for the rest of this session; \
-                 audio is passing through unprocessed. Restart the app to try again.",
-            )
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        BvcBackend::Tse if !state.handles.tse_available => Some(
-            text(format!(
-                "TSE is unavailable: {}",
-                state.handles.tse_unavailable_reason.as_deref().unwrap_or("no model bundled")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        BvcBackend::DeepFilter if !state.handles.mic_deep_filter_available => Some(
-            text(format!(
-                "DeepFilterNet is unavailable: {}",
-                state.handles.mic_deep_filter_unavailable_reason.as_deref().unwrap_or("model failed to load")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        BvcBackend::DeepFilter => Some(
-            text("Generic noise/other-voice suppression (DeepFilterNet) - like Hush, this doesn't target a specific speaker. For suppressing a specific person's voice, use Target Speaker (TSE).")
-                .size(11)
-                .color(Color::from_rgb(0.55, 0.55, 0.55))
-                .into(),
-        ),
-        BvcBackend::Vanta if !state.handles.mic_vanta_available => Some(
-            text(format!(
-                "Vanta is unavailable: {}",
-                state.handles.mic_vanta_unavailable_reason.as_deref().unwrap_or("model failed to load")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        BvcBackend::Vanta => Some(
-            text(
-                state
-                    .handles
-                    .mic_vanta_unavailable_reason
-                    .as_deref()
-                    .unwrap_or("EXPERIMENTAL: real but weak target-speaker model - may sometimes make audio worse, not better."),
-            )
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.6, 0.1))
-            .into(),
-        ),
-        BvcBackend::HushBpoV1 if !state.handles.mic_bpo_v1_available => Some(
-            text(format!(
-                "bpo_v1 is unavailable: {}",
-                state.handles.mic_bpo_v1_unavailable_reason.as_deref().unwrap_or("model failed to load")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        // Mirrors the `BvcBackend::Hush` bypass-report arm above - see
-        // `EngineHandles::mic_bpo_v1_status`'s docs.
-        BvcBackend::HushBpoV1 if state.handles.mic_bpo_v1_status.as_ref().is_some_and(|s| s.is_bypassed()) => Some(
-            text(
-                "Hush (bpo_v1) stopped responding and has been bypassed for the rest of this session; \
-                 audio is passing through unprocessed. Restart the app to try again.",
-            )
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        BvcBackend::HushBpoV1 => Some(
-            text("A fine-tune of Hush's own checkpoint (bpo_v1) - same Hush engine and architecture as the default option above, just a different trained model. Does not replace the default Hush option, which remains separately selectable.")
-                .size(11)
-                .color(Color::from_rgb(0.55, 0.55, 0.55))
-                .into(),
-        ),
-        _ => None,
-    };
-
-    let bvc_backend_row = row![
-        text("Backend").size(12),
-        pick_list(&BVC_BACKEND_NAMES[..], Some(selected_backend.name()), Message::SelectBvcBackend),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
-
-    let mut bvc_section = column![text("Background Voice Cancellation (BVC)").size(14), bvc_backend_row].spacing(6);
-    if let Some(note) = bvc_unavailable_note {
-        bvc_section = bvc_section.push(note);
-    }
-    bvc_section = bvc_section.push(enrollment_section(state));
-
-    let mic_studio_preset_row = row![
-        text("Studio preset").size(12),
-        pick_list(
-            &STUDIO_PRESET_NAMES[..],
-            Some(studio_preset_name(studio_preset_from_index(state.handles.mic_studio_preset.load()))),
-            Message::SelectMicStudioPreset,
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
-
-    let monitor_section = column![
-        text("Monitor - hear the processed mic locally, for testing (not part of the normal virtual-mic/speaker signal path)").size(13),
-        toggler(state.handles.monitor.is_on())
-            .label("Monitor (hear processed mic locally)")
-            .on_toggle(Message::ToggleMonitor),
-        device_picker(
-            "Monitor output device (e.g. your headphones)",
-            &state.devices.render,
-            &state.settings.monitor_device_id,
-            Message::SelectMonitorDevice,
-        ),
-    ]
-    .spacing(8);
-
-    // Accent: its own on/off switch (independent of BVC) + voice picker + live status (RTF, added latency).
-    let accent_on = state.settings.accent_on;
-    let accent_status = state.handles.accent.status();
-    let accent_label = accent_onnx::VOICE_CHOICES[(state.settings.accent_voice_index() - 1) as usize];
-    // The switch only records what you clicked; this line says what is REALLY happening (green = converting,
-    // amber = starting, red = switched on but NOT converting, grey = off), so a lit switch can never mislead.
-    let (accent_dot, accent_color) = match accent_status.state {
-        accent_onnx::pipeline::AccentState::Active => ("\u{25CF}", Color::from_rgb(0.2, 0.65, 0.3)),
-        accent_onnx::pipeline::AccentState::Loading | accent_onnx::pipeline::AccentState::Starting => {
-            ("\u{25CF}", Color::from_rgb(0.9, 0.65, 0.1))
-        }
-        accent_onnx::pipeline::AccentState::Paused | accent_onnx::pipeline::AccentState::Unavailable => {
-            ("\u{25CF}", Color::from_rgb(0.85, 0.2, 0.2))
-        }
-        accent_onnx::pipeline::AccentState::Off => ("\u{25CB}", Color::from_rgb(0.55, 0.55, 0.55)),
-    };
-    let accent_section = column![
-        toggler(accent_on).label("Accent conversion (Indian -> American English)").on_toggle(Message::ToggleAccent),
-        row![
-            text("Accent voice").size(12),
-            pick_list(&accent_onnx::VOICE_CHOICES[..], Some(accent_label), Message::SelectAccentVoice),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-        text(format!("{accent_dot} {}", accent_status.line())).size(12).color(accent_color),
-        text("Works with BVC on or off; cleaner input (BVC on) converts better.").size(11).color(Color::from_rgb(0.55, 0.55, 0.55)),
-    ]
-    .spacing(2);
-
-    // Live transcript: its own switch; shows the last lines (+ the sentence in progress) and where it is saved.
-    let transcript_status = state.handles.transcript.status();
-    let (transcript_dot, transcript_color) = match transcript_status.state {
-        asr_onnx::pipeline::TranscriptState::Listening | asr_onnx::pipeline::TranscriptState::Transcribing => {
-            ("\u{25CF}", Color::from_rgb(0.2, 0.65, 0.3))
-        }
-        asr_onnx::pipeline::TranscriptState::Loading => ("\u{25CF}", Color::from_rgb(0.9, 0.65, 0.1)),
-        asr_onnx::pipeline::TranscriptState::Unavailable => ("\u{25CF}", Color::from_rgb(0.85, 0.2, 0.2)),
-        asr_onnx::pipeline::TranscriptState::Off => ("\u{25CB}", Color::from_rgb(0.55, 0.55, 0.55)),
-    };
-    let mut transcript_section = column![
-        toggler(state.settings.transcript_on).label("Live transcript (speech to text)").on_toggle(Message::ToggleTranscript),
-        text(format!("{transcript_dot} {}", transcript_status.line())).size(12).color(transcript_color),
-    ]
-    .spacing(2);
-    if state.settings.transcript_on {
-        let (lines, partial) = state.handles.transcript.snapshot(30);
-        let mut body = column![].spacing(2);
-        if lines.is_empty() && partial.is_empty() {
-            body = body.push(text("Say something - your words appear here.").size(12).color(Color::from_rgb(0.55, 0.55, 0.55)));
-        }
-        for l in lines {
-            body = body.push(text(format!("[{}] {}", asr_onnx::pipeline::fmt_time(l.at_secs), l.text)).size(13));
-        }
-        if !partial.is_empty() {
-            body = body.push(text(format!("... {partial}")).size(13).color(Color::from_rgb(0.55, 0.55, 0.55)));
-        }
-        transcript_section = transcript_section
-            .push(container(scrollable(body).height(Length::Fixed(130.0)).anchor_bottom()).padding(6).width(Length::Fill))
-            .push(
-                row![
-                    button(text("Clear").size(12)).on_press(Message::ClearTranscript),
-                    text(
-                        state
-                            .handles
-                            .transcript
-                            .save_path()
-                            .map(|p| format!("Saved to {}", p.display()))
-                            .unwrap_or_else(|| "Saved to the ClearNAI folder, transcripts".to_string())
-                    )
-                    .size(11)
-                    .color(Color::from_rgb(0.55, 0.55, 0.55)),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            );
-    }
-
-    let toggles = column![
-        toggler(state.handles.mic_noise.is_on())
-            .label("RNNoise (between Mic and Virtual Mic)")
-            .on_toggle(Message::ToggleMicNoise),
-        column![
-            toggler(state.handles.mic_voice_gate.is_on())
-                .label("Voice Gate (suppress quiet background voices)")
-                .on_toggle(Message::ToggleMicVoiceGate),
-            text("Attenuates background talk that's quieter than your own voice - a fast, real-time alternative to Target Speaker (TSE) for background voices at a similar or lower volume, not just noise. Won't help against a background voice speaking at the same volume as you - that needs TSE.")
-                .size(11)
-                .color(Color::from_rgb(0.55, 0.55, 0.55)),
-        ]
-        .spacing(2),
-        accent_section,
-        transcript_section,
-        toggler(state.handles.mic_studio.is_on())
-            .label("Studio")
-            .on_toggle(Message::ToggleMicStudio),
-        mic_studio_preset_row,
-    ]
-    .spacing(10);
-
-    // Turns off the two most CPU-expensive mic-path stages (BVC's ONNX
-    // inference, then Studio's EQ/compressor chain) in one click - see
-    // `Message::EnableLowCpuMode`'s doc comment. Placed right under the
-    // toggles it affects rather than buried in a settings menu, since it's
-    // meant to be reached for exactly when the "Dropped frames"/"Engine:
-    // Overloaded" indicators above are already visibly bad.
-    let low_cpu_row = row![
-        button(text("Low CPU mode (turn off BVC + Studio, both paths)").size(13)).on_press(Message::EnableLowCpuMode),
-        text("Keeps RNNoise on - use this if the Engine status above shows Degraded/Overloaded.").size(11),
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Center);
-
-    let mut low_cpu_section = column![low_cpu_row].spacing(6);
-    if state.show_low_cpu_suggestion {
-        // Auto-detected (see `Message::Tick`'s `consecutive_overloaded_ticks`
-        // handling) - this only ever *suggests* clicking the button above,
-        // never flips the toggles itself. Silently degrading forever
-        // without telling the user is exactly the failure mode this exists
-        // to avoid.
-        low_cpu_section = low_cpu_section.push(
-            text("⚠ Sustained overload detected - processing is consistently missing its 10ms deadline. \
-                  Consider clicking Low CPU mode above.")
-                .size(12)
-                .color(Color::from_rgb(0.85, 0.6, 0.1)),
-        );
-    }
-
-    let devices_heading = row![
-        text("Virtual devices (see docs/VIRTUAL_DEVICES.md - two separate cable instances required)").size(13),
-        button(text("Refresh devices").size(12)).on_press(Message::RefreshDevices),
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Center);
-
-    let devices = column![
-        devices_heading,
-        text("Started VoiceMeter/VB-Cable after ClearNAI? Click Refresh, then (re)select it below - devices are only scanned once at launch.").size(12),
-        device_picker(
-            "Virtual mic target (render into this device)",
-            &state.devices.render,
-            &state.settings.virtual_mic_target_id,
-            Message::SelectMicTarget,
-        ),
-        device_picker(
-            "Physical microphone (real input device)",
-            &state.devices.capture,
-            &state.settings.physical_mic_device_id,
-            Message::SelectPhysicalMic,
-        ),
-    ]
-    .spacing(8);
-
-    // --- Speaker-outbound (Pipeline 2): incoming-call audio cleanup, own
-    // BVC picker (Off/Hush/DeepFilterNet only - no TSE/Vanta, see
-    // `tse_engine::SpeakerBvcBackend`'s docs), own toggles, own device pair
-    // (a SECOND, independent virtual cable's capture endpoint + the user's
-    // real speaker/headphone output). Entirely separate from the mic
-    // section above - the two paths run on independent threads and can be
-    // configured/toggled independently.
-    let selected_speaker_backend = tse_engine::SpeakerBvcBackend::from_index(state.handles.speaker_bvc_backend.load());
-    let speaker_bvc_unavailable_note: Option<Element<'_, Message>> = match selected_speaker_backend {
-        tse_engine::SpeakerBvcBackend::Hush if !state.handles.speaker_bvc_available => Some(
-            text(format!(
-                "Hush is unavailable: {}",
-                state.handles.speaker_bvc_unavailable_reason.as_deref().unwrap_or("weya_nc.dll not found")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        tse_engine::SpeakerBvcBackend::DeepFilter if !state.handles.speaker_deep_filter_available => Some(
-            text(format!(
-                "DeepFilterNet is unavailable: {}",
-                state.handles.speaker_deep_filter_unavailable_reason.as_deref().unwrap_or("model failed to load")
-            ))
-            .size(12)
-            .color(Color::from_rgb(0.85, 0.2, 0.2))
-            .into(),
-        ),
-        _ => None,
-    };
-
-    let speaker_bvc_backend_row = row![
-        text("Backend").size(12),
-        pick_list(&SPEAKER_BVC_BACKEND_NAMES[..], Some(selected_speaker_backend.name()), Message::SelectSpeakerBvcBackend),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
-
-    let mut speaker_bvc_section = column![
-        text("Background Voice Cancellation (BVC) - Speaker").size(14),
-        speaker_bvc_backend_row,
-        text("No target-speaker (TSE) options here - there's no way to enroll an arbitrary caller's voice ahead of time.")
-            .size(11)
-            .color(Color::from_rgb(0.55, 0.55, 0.55)),
-    ]
-    .spacing(6);
-    if let Some(note) = speaker_bvc_unavailable_note {
-        speaker_bvc_section = speaker_bvc_section.push(note);
-    }
-
-    let speaker_studio_preset_row = row![
-        text("Studio preset").size(12),
-        pick_list(
-            &STUDIO_PRESET_NAMES[..],
-            Some(studio_preset_name(studio_preset_from_index(state.handles.speaker_studio_preset.load()))),
-            Message::SelectSpeakerStudioPreset,
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
-
-    let speaker_toggles = column![
-        toggler(state.handles.speaker_noise.is_on())
-            .label("RNNoise (between Speaker Source and Physical Speaker)")
-            .on_toggle(Message::ToggleSpeakerNoise),
-        toggler(state.handles.speaker_studio.is_on())
-            .label("Studio")
-            .on_toggle(Message::ToggleSpeakerStudio),
-        speaker_studio_preset_row,
-    ]
-    .spacing(10);
-
-    let speaker_devices = column![
-        text("Speaker-outbound devices (needs a SECOND, independent virtual cable - e.g. VB-CABLE A+B - separate from the mic path's)").size(13),
-        device_picker(
-            "Virtual speaker source (capture from this device - set your call app's output to its matching input)",
-            &state.devices.capture,
-            &state.settings.virtual_speaker_source_id,
-            Message::SelectSpeakerSource,
-        ),
-        device_picker(
-            "Physical speaker (real output device)",
-            &state.devices.render,
-            &state.settings.real_speaker_output_device_id,
-            Message::SelectRealSpeakerOutput,
-        ),
-    ]
-    .spacing(8);
-
-    let mut warnings_col = column![].spacing(4);
-    for w in &state.warnings {
-        warnings_col = warnings_col.push(text(format!("\u{26A0} {w}")).size(12).color(Color::from_rgb(0.85, 0.6, 0.1)));
-    }
-
-    let mic_status_row = row![
-        status_row(state),
-        toggler(state.handles.mic_master_enabled.is_on()).label("Mic path enabled").on_toggle(Message::ToggleMicMasterEnabled),
-    ]
-    .spacing(16)
-    .align_y(iced::Alignment::Center);
-    let speaker_status_and_button = row![
-        speaker_status_row(state),
-        toggler(state.handles.speaker_master_enabled.is_on())
-            .label("Speaker path enabled")
-            .on_toggle(Message::ToggleSpeakerMasterEnabled),
-    ]
-    .spacing(16)
-    .align_y(iced::Alignment::Center);
-
-    let content = column![
-        text("ClearNAI").size(24),
-        mic_status_row,
-        iced::widget::rule::horizontal(1),
-        bvc_section,
-        iced::widget::rule::horizontal(1),
-        monitor_section,
-        iced::widget::rule::horizontal(1),
-        low_cpu_section,
-        toggles,
-        iced::widget::rule::horizontal(1),
-        devices,
-        iced::widget::rule::horizontal(1),
-        speaker_status_and_button,
-        speaker_bvc_section,
-        speaker_toggles,
-        speaker_devices,
-        warnings_col,
-    ]
-    .spacing(16)
-    .padding(20);
-
-    scrollable(content).into()
-}
 
 /// One pass/fail line in the setup screen's compatibility list, reusing the
 /// same green/red palette `status_ui::status_color` uses for
@@ -1429,14 +1046,14 @@ fn view_setup(setup: &SetupState) -> Element<'_, Message> {
     let compat_col = column![
         text("System compatibility").size(16),
         compat_line("Operating system (Windows 10/11)", setup.compat.os_ok),
-        compat_line("CPU architecture (x86_64)", setup.compat.arch_ok),
-        compat_line("Audio subsystem (COM)", setup.compat.com_ok),
+        compat_line("64-bit processor", setup.compat.arch_ok),
+        compat_line("Windows audio", setup.compat.com_ok),
     ]
     .spacing(6);
 
     let mut details_col = column![].spacing(2);
     for d in &setup.compat.details {
-        details_col = details_col.push(text(d).size(11).color(Color::from_rgb(0.6, 0.6, 0.6)));
+        details_col = details_col.push(text(d).size(11).style(text::secondary));
     }
 
     // BVC's DLL + model bundle are embedded in the binary and self-extract
@@ -1446,14 +1063,14 @@ fn view_setup(setup: &SetupState) -> Element<'_, Message> {
     // failed (disk full, unwritable %LOCALAPPDATA%, etc.).
     let model_col: Element<'_, Message> = match &setup.bvc_extraction_error {
         None => column![
-            text("BVC files").size(16),
-            compat_line("weya_nc.dll and the BVC model bundle ready", true),
+            text("Voice models").size(16),
+            compat_line("Noise and voice models are ready", true),
         ]
         .spacing(6)
         .into(),
         Some(err) => column![
-            text("BVC files").size(16),
-            compat_line("failed to prepare weya_nc.dll / BVC model bundle", false),
+            text("Voice models").size(16),
+            compat_line("Couldn't prepare the noise and voice models", false),
             text(err.clone()).size(12).color(Color::from_rgb(0.85, 0.2, 0.2)),
         ]
         .spacing(8)
@@ -1461,19 +1078,16 @@ fn view_setup(setup: &SetupState) -> Element<'_, Message> {
     };
 
     let content = column![
-        text("ClearNAI - first-run setup").size(24),
+        tabs::logo_with_wordmark(setup.settings.theme_dark, 36.0),
+        text("A quick check before you start").size(18),
         compat_col,
         details_col,
         iced::widget::rule::horizontal(1),
         model_col,
         iced::widget::rule::horizontal(1),
-        text(
-            "You can continue without BVC (background voice cleanup) - the rest of the \
-             pipeline works normally and BVC will simply show as unavailable, exactly like \
-             today's behavior when weya_nc.dll or the model file fail to load."
-        )
-        .size(12)
-        .color(Color::from_rgb(0.6, 0.6, 0.6)),
+        text("You can continue anyway. Everything else works normally, and background voice removal will show as unavailable.")
+            .size(12)
+            .style(text::secondary),
         button(text("Continue")).on_press(Message::ContinueFromSetup),
     ]
     .spacing(16)
@@ -1485,8 +1099,23 @@ fn view_setup(setup: &SetupState) -> Element<'_, Message> {
 fn view(screen: &Screen) -> Element<'_, Message> {
     match screen {
         Screen::Setup(setup) => view_setup(setup),
-        Screen::Main(state) => view_main(state),
+        Screen::Main(state) if state.settings.compact_mode => tabs::view_compact(state),
+        Screen::Main(state) => tabs::view_full(state),
     }
+}
+
+/// The title-bar / taskbar icon: 64x64 straight-alpha RGBA rendered from the logo (see `assets/clearnai.ico`).
+fn window_icon() -> Option<iced::window::Icon> {
+    const RGBA: &[u8] = include_bytes!("../assets/clearnai_icon_64.rgba");
+    iced::window::icon::from_rgba(RGBA.to_vec(), 64, 64).ok()
+}
+
+fn theme(screen: &Screen) -> iced::Theme {
+    let dark = match screen {
+        Screen::Setup(setup) => setup.settings.theme_dark,
+        Screen::Main(state) => state.settings.theme_dark,
+    };
+    if dark { iced::Theme::Dark } else { iced::Theme::Light }
 }
 
 fn subscription(_screen: &Screen) -> Subscription<Message> {
@@ -1499,6 +1128,15 @@ fn subscription(_screen: &Screen) -> Subscription<Message> {
 /// Runs the GUI. Blocks until the window is closed, at which point the
 /// whole process exits (no tray icon, no background daemon - per spec).
 pub fn run(initial: Initial) -> iced::Result {
+    let (start_size, start_level) = window_size_and_level(initial.settings.compact_mode);
+    // Reconcile the Windows sign-in entry with the saved setting, and start the Ctrl+Shift+M mute hotkey.
+    if let Err(e) = crate::sysutil::set_autostart(initial.settings.start_with_windows) {
+        crate::log_error!("[clearnairt] {e}");
+    }
+    crate::sysutil::start_mute_hotkey();
+    if initial.settings.minimize_to_tray {
+        crate::tray::start();
+    }
     let cell = RefCell::new(Some(initial));
     iced::application(
         move || {
@@ -1529,23 +1167,13 @@ pub fn run(initial: Initial) -> iced::Result {
                     keepalive: initial.keepalive,
                 })
             } else {
-                Screen::Main(MainState {
-                    settings: initial.settings,
-                    handles: initial.handles,
-                    devices: initial.devices,
+                Screen::Main(MainState::new(
+                    initial.settings,
+                    initial.handles,
+                    initial.devices,
                     warnings,
-                    status: RealtimeStatus::Bypass,
-                    level: 0.0,
-                    _keepalive: initial.keepalive,
-                    device_switch_seqs: Arc::new(DeviceSwitchSequences::default()),
-                    io_counters_snapshot: IoCountersSnapshot::default(),
-                    speaker_status: RealtimeStatus::Bypass,
-                    speaker_io_counters_snapshot: IoCountersSnapshot::default(),
-                    consecutive_overloaded_ticks: 0,
-                    show_low_cpu_suggestion: false,
-                    enrollment_state: enrollment::EnrollmentState::Idle,
-                    playback: None,
-                })
+                    initial.keepalive,
+                ))
             }
         },
         update,
@@ -1553,7 +1181,8 @@ pub fn run(initial: Initial) -> iced::Result {
     )
     .title("ClearNAI")
     .subscription(subscription)
+    .theme(theme)
     .exit_on_close_request(false)
-    .window_size(iced::Size::new(560.0, 720.0))
+    .window(iced::window::Settings { size: start_size, level: start_level, icon: window_icon(), ..Default::default() })
     .run()
 }

@@ -45,6 +45,10 @@ pub struct Settings {
     #[serde(default)]
     #[allow(dead_code)]
     aec_on: bool,
+    /// Echo cancellation: removes the call audio your speakers play from what your mic hears. Default ON; it
+    /// only acts while call audio is being played (see `crates/aec`).
+    #[serde(default = "default_true")]
+    pub echo_cancel_on: bool,
     /// "RNNoise (outbound, before Virtual Speaker forward)" - default ON.
     /// Replaces the old combined `speaker_cleanup_on` field: the outbound
     /// path is now 3 independently-toggleable stages, mirroring the mic
@@ -101,17 +105,6 @@ pub struct Settings {
     /// all, regardless of `monitor_enabled`.
     #[serde(default)]
     pub monitor_device_id: Option<String>,
-    /// WASAPI render-device id "Play Recording" (the enrollment playback
-    /// button) plays into. `None` means the system default output device
-    /// - e.g. whatever the user's Bluetooth headset happens to be, if it's
-    /// currently the Windows default, which is real, observed behavior
-    /// this field exists specifically to let the user override. Unlike
-    /// `monitor_device_id`, this is read fresh on each "Play Recording"
-    /// click (see `engine::play_recorded_audio`) rather than driving a
-    /// live, continuously-running render stream, so no live-switch
-    /// plumbing is needed for it.
-    #[serde(default)]
-    pub recording_playback_device_id: Option<String>,
     /// WASAPI render-device id the speaker-outbound path renders the
     /// cleaned incoming-call audio into - the user's actual physical
     /// speakers/headphones. `None` means the system default output device.
@@ -121,33 +114,24 @@ pub struct Settings {
     pub real_speaker_output_device_id: Option<String>,
     /// Which BVC backend is selected for the speaker-outbound path -
     /// Off/Hush/DeepFilterNet only (see `tse_engine::SpeakerBvcBackend`).
-    /// Deliberately NOT the same (now 6-option) enum as `mic_bvc_backend`:
-    /// target-speaker extraction (TSE/Vanta) needs an enrolled voice to
-    /// preserve, and there's no way to enroll an arbitrary incoming caller
-    /// ahead of time, so those options don't exist on this path at all.
+    /// Deliberately NOT the same enum as `mic_bvc_backend`.
     /// `Hush (bpo_v1)` (see `tse_engine::BvcBackend::HushBpoV1`) is mic-path
     /// only for now - no speaker-path instance of this checkpoint exists
     /// yet (one could be added the same way the speaker path's own Hush
     /// instance already exists, if ever needed).
     #[serde(default = "default_speaker_bvc_backend")]
     pub speaker_bvc_backend: u8,
-    /// Which BVC backend is selected for the mic path - Off/Hush/TSE (see
-    /// `tse_engine::BvcBackend`), encoded the same "plain `u8` index"
-    /// way `mic_studio_preset` already is. Default `1` (Hush), matching
-    /// this project's previous behavior (BVC was always Hush, just
-    /// on/off) - an existing user's saved `mic_bvc_on` preference is
-    /// still honored for whether Hush actually runs (see `EngineHandles`);
-    /// this field only decides *which* backend an "on" BVC toggle means.
-    /// TSE (index `2`) is a real, selectable option in the GUI, but
-    /// currently always falls back to pass-through audio because no real
-    /// TSE model is integrated yet - see `tse_engine::UnavailableTse`'s docs.
+    /// Which BVC backend is selected for the mic path - Off/Hush/DeepFilterNet/
+    /// Hush-bpo_v1 (see `tse_engine::BvcBackend`), encoded the same "plain
+    /// `u8` index" way `mic_studio_preset` already is. Default `1` (Hush),
+    /// matching this project's previous behavior (BVC was always Hush, just
+    /// on/off) - an existing user's saved `mic_bvc_on` preference is still
+    /// honored for whether Hush actually runs (see `EngineHandles`); this
+    /// field only decides *which* backend an "on" BVC toggle means. Saved
+    /// indices of the removed target-speaker/Vanta backends load as Hush
+    /// (see `BvcBackend::from_index`).
     #[serde(default = "default_bvc_backend")]
     pub mic_bvc_backend: u8,
-    /// Reference sentence shown during "Record Voice Reference" enrollment.
-    /// Configurable so a future localized build (or a user who wants a
-    /// sentence more natural to say) isn't stuck with the hardcoded default.
-    #[serde(default = "default_reference_sentence")]
-    pub reference_sentence: String,
     /// Set once the user has explicitly clicked "Continue"/"Skip" past the
     /// first-run setup screen while a compatibility check was failing.
     /// Suppresses re-showing the setup screen for *that* reason on
@@ -171,6 +155,23 @@ pub struct Settings {
     /// Live transcript (speech-to-text of your own mic). Default OFF; `#[serde(default)]` keeps older files loading.
     #[serde(default)]
     pub transcript_on: bool,
+    /// Compact ("collapsed") window: a small always-on-top bar with the main switches. Default OFF (full window);
+    /// `#[serde(default)]` keeps older files loading.
+    #[serde(default)]
+    pub compact_mode: bool,
+    /// Dark window theme. Default OFF (light); `#[serde(default)]` keeps older files loading.
+    #[serde(default)]
+    pub theme_dark: bool,
+    /// Launch ClearNAI at Windows sign-in (HKCU Run key, see `sysutil::set_autostart`). Default OFF.
+    #[serde(default)]
+    pub start_with_windows: bool,
+    /// Closing the window hides it to a notification-area icon instead of quitting (see `tray.rs`). Default OFF.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
+    /// Last profile picked in the header (see `ui_logic::PROFILES`); empty = none. Only shown while the switches
+    /// still match it.
+    #[serde(default)]
+    pub profile: String,
 }
 
 impl Settings {
@@ -200,10 +201,6 @@ fn default_speaker_bvc_backend() -> u8 {
     tse_engine::SpeakerBvcBackend::Hush.to_index()
 }
 
-fn default_reference_sentence() -> String {
-    enrollment::DEFAULT_REFERENCE_SENTENCE.to_string()
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -213,6 +210,7 @@ impl Default for Settings {
             mic_studio_on: true,
             mic_studio_preset: default_studio_preset(),
             aec_on: false,
+            echo_cancel_on: true,
             speaker_noise_on: true,
             speaker_bvc_on: true,
             speaker_studio_on: true,
@@ -223,15 +221,18 @@ impl Default for Settings {
             physical_mic_device_id: None,
             monitor_enabled: false,
             monitor_device_id: None,
-            recording_playback_device_id: None,
             real_speaker_output_device_id: None,
             speaker_bvc_backend: default_speaker_bvc_backend(),
             mic_bvc_backend: default_bvc_backend(),
-            reference_sentence: default_reference_sentence(),
             setup_acknowledged: false,
             accent_on: false,
             accent_voice: 1,
             transcript_on: false,
+            compact_mode: false,
+            theme_dark: false,
+            start_with_windows: false,
+            minimize_to_tray: false,
+            profile: String::new(),
         }
     }
 }
@@ -326,16 +327,14 @@ mod tests {
             tse_engine::SpeakerBvcBackend::Hush.to_index(),
             "speaker BVC backend defaults to Hush, same as the mic path"
         );
-        assert_eq!(s.reference_sentence, enrollment::DEFAULT_REFERENCE_SENTENCE);
         assert!(!s.setup_acknowledged, "setup screen must not be pre-acknowledged by default");
     }
 
     #[test]
     fn settings_json_from_before_tse_fields_existed_still_loads() {
         // Simulates a real settings.json written before this task added
-        // `mic_bvc_backend`/`reference_sentence` - must still deserialize
-        // via `#[serde(default)]`, falling back to Hush/the built-in
-        // sentence rather than losing every other saved preference.
+        // `mic_bvc_backend` - must still deserialize via `#[serde(default)]`,
+        // falling back to Hush rather than losing every other saved preference.
         let json = r#"{
             "mic_noise_on": true,
             "mic_bvc_on": true,
@@ -347,14 +346,30 @@ mod tests {
         }"#;
         let s: Settings = serde_json::from_str(json).expect("old-format settings.json must still parse");
         assert_eq!(s.mic_bvc_backend, tse_engine::BvcBackend::Hush.to_index());
-        assert_eq!(s.reference_sentence, enrollment::DEFAULT_REFERENCE_SENTENCE);
     }
 
     #[test]
-    fn round_trips_bvc_backend_and_reference_sentence_through_json() {
+    fn settings_json_with_removed_enrollment_fields_still_loads() {
+        let json = r#"{
+            "mic_noise_on": true,
+            "mic_bvc_on": true,
+            "mic_studio_on": true,
+            "aec_on": false,
+            "speaker_tap_on": true,
+            "virtual_mic_target_id": null,
+            "virtual_speaker_source_id": null,
+            "reference_sentence": "old sentence",
+            "recording_playback_device_id": "{dev}",
+            "mic_bvc_backend": 4
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("settings with removed keys must still parse");
+        assert_eq!(tse_engine::BvcBackend::from_index(s.mic_bvc_backend), tse_engine::BvcBackend::Hush);
+    }
+
+    #[test]
+    fn round_trips_bvc_backend_through_json() {
         let mut s = Settings::default();
-        s.mic_bvc_backend = tse_engine::BvcBackend::Tse.to_index();
-        s.reference_sentence = "A custom sentence.".to_string();
+        s.mic_bvc_backend = tse_engine::BvcBackend::DeepFilter.to_index();
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(s, back);
@@ -485,6 +500,7 @@ mod tests {
         }"#;
         let s: Settings = serde_json::from_str(json).expect("old-format settings.json must still parse");
         assert!(!s.accent_on, "Accent defaults Off");
+        assert!(s.echo_cancel_on, "Echo removal defaults On");
         assert_eq!(s.accent_effective_voice(), 0);
         assert_eq!(s.accent_voice_index(), 1, "a missing voice means American male 1");
         assert!(!Settings::default().accent_on);

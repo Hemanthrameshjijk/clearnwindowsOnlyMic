@@ -8,12 +8,7 @@ members = [
     "crates/audio-io",
     "crates/aec",
     "crates/driver-transport",
-    "crates/speaker-profile",
-    "crates/speaker-encoder",
-    "crates/enrollment",
     "crates/tse-engine",
-    "crates/tse-bsrnn",
-    "crates/bvc-vanta",
     "crates/accent-onnx",
     "crates/asr-onnx",
     "app",
@@ -27,3 +22,28 @@ edition = "2021"
 opt-level = 3
 lto = true
 panic = "abort"
+
+# Real-time audio cannot run unoptimised: in a plain debug build the accent model's pre/post-processing is too slow,
+# the accent stage reports "CPU too slow" and pauses itself. Optimise every dependency and the audio crates (the
+# GUI crate itself stays a fast-compiling debug build).
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.aec]
+opt-level = 3
+[profile.dev.package.dsp-core]
+opt-level = 3
+[profile.dev.package.audio-io]
+opt-level = 3
+[profile.dev.package.accent-onnx]
+opt-level = 3
+[profile.dev.package.asr-onnx]
+opt-level = 3
+[profile.dev.package.bvc-hush]
+opt-level = 3
+[profile.dev.package.noise-engine]
+opt-level = 3
+[profile.dev.package.studio-dsp]
+opt-level = 3
+[profile.dev.package.tse-engine]
+opt-level = 3

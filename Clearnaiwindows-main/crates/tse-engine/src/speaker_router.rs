@@ -1,12 +1,9 @@
 //! `SpeakerBvcRouterStage`: the speaker-outbound path's own BVC backend
 //! selector - deliberately a SEPARATE, smaller type from `BvcRouterStage`/
-//! `BvcBackend`, not a reuse of them. Target-speaker extraction (TSE/Vanta)
-//! needs an enrolled voice to preserve; there's no way to enroll an
-//! arbitrary incoming caller ahead of time, so those two options don't
-//! exist on this path at all - just generic noise/background-voice
-//! suppression (Hush, DeepFilterNet), same as the mic path's non-targeted
-//! options. Same lock-free `SharedPreset` dispatch pattern as
-//! `BvcRouterStage` - see that type's docs for the general reasoning.
+//! `BvcBackend`, not a reuse of them. It offers just generic
+//! noise/background-voice suppression (Hush, DeepFilterNet). Same lock-free
+//! `SharedPreset` dispatch pattern as `BvcRouterStage` - see that type's docs
+//! for the general reasoning.
 
 use dsp_core::{SharedPreset, Stage};
 

@@ -105,7 +105,7 @@ impl HardwareRender {
                         // stale id) fails identically on every attempt: say so
                         // on the first failure and then about once a minute,
                         // not every backoff for hours.
-                        if failed_attempts == 1 || failed_attempts % 30 == 0 {
+                        if failed_attempts == 1 || failed_attempts % 12 == 0 {
                             crate::report_error(&format!(
                                 "[audio-io] hardware render thread error (attempt {failed_attempts}), retrying every {}s: {e:#}",
                                 RECONNECT_BACKOFF.as_secs()
@@ -115,7 +115,9 @@ impl HardwareRender {
                     if thread_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    wait_discarding(RECONNECT_BACKOFF, &mut consumer, &thread_stop);
+                    // Quick retries first, then every 5 s for a device that is simply gone (unplugged headset).
+                    let backoff = if failed_attempts <= 3 { RECONNECT_BACKOFF } else { RECONNECT_BACKOFF * 5 / 2 };
+                    wait_discarding(backoff, &mut consumer, &thread_stop);
                 }
             })
             .context("spawning hardware render thread")?;
@@ -258,6 +260,10 @@ fn render_loop(
     let mut pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES);
     let mut out_bytes: VecDeque<u8> = VecDeque::with_capacity(FRAME_SAMPLES * 4 * 4);
 
+    // Underruns are expected whenever nothing is feeding this device (idle, or a source that has not started);
+    // log the first one and then a summary at most every 30 s instead of a line per second.
+    let mut last_underrun_log: Option<std::time::Instant> = None;
+    let mut underruns_since_log: u64 = 0;
     while !stop_flag.load(Ordering::Relaxed) {
         if event_handle.wait_for_event(1000).is_err() {
             bail!("render event wait failed or timed out; render device likely became unavailable");
@@ -280,10 +286,15 @@ fn render_loop(
             let got = pull_frame(consumer, &mut pending[start..]);
             if got < FRAME_SAMPLES {
                 counters.output_underruns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::report_error(&format!(
-                    "[audio-io] render ring buffer underrun, padding {} samples of silence",
-                    FRAME_SAMPLES - got
-                ));
+                underruns_since_log += 1;
+                let due = last_underrun_log.map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(30));
+                if due {
+                    crate::report_error(&format!(
+                        "[audio-io] render underrun: {underruns_since_log} frame(s) padded with silence since the last note"
+                    ));
+                    last_underrun_log = Some(std::time::Instant::now());
+                    underruns_since_log = 0;
+                }
             }
         }
 

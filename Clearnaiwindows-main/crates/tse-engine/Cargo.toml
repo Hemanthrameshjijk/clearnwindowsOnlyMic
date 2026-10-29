@@ -5,4 +5,3 @@ edition.workspace = true
 
 [dependencies]
 dsp-core = { path = "../dsp-core" }
-speaker-profile = { path = "../speaker-profile" }

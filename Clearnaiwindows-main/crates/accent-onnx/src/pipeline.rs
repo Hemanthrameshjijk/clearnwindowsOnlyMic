@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tse_bsrnn::causal_resampler::CausalDownsampler3x;
+use crate::causal_resampler::CausalDownsampler3x;
 
 /// Worker push size: 100 ms of 48 kHz audio (-> 1600 samples at 16 kHz = 8 mel frames). 100 ms needs ~35% less CPU
 /// than 50 ms (RTF 0.45 vs 0.69 at 4 threads) for +25 ms delay, which keeps it real-time when other apps load the PC.
@@ -183,17 +183,26 @@ pub struct AccentConfig {
     pub prepare_models: Option<Box<dyn FnOnce() -> Result<PathBuf, String> + Send>>,
 }
 
+/// ORT intra-op threads for the accent sessions, chosen from the machine's logical core count so the model never
+/// takes cores the audio threads need. Override: `CLEARNAI_ACCENT_THREADS`.
+///
+/// Above 8 cores this keeps the original rule, measured on a 12-thread PC with the full chain (Hush + Accent +
+/// AutoGain, `accent_bench live`): 4 threads -> mic-thread p99 10.5 ms (over its 10 ms deadline), 2 underruns, +747 ms
+/// added delay and an RTF close to the 0.9 pause limit; 8 threads -> p99 5.7 ms, 1 underrun, +477 ms. The smaller
+/// tiers below are ESTIMATES (leave room for ~5 audio/worker threads), NOT measured on an i3 or any other small CPU.
+pub fn accent_threads_for_cores(cores: usize) -> usize {
+    match cores {
+        0..=2 => 1,
+        3..=4 => cores / 2,
+        5..=8 => cores.saturating_sub(2).max(2),
+        _ => cores.saturating_sub(4).clamp(4, 8),
+    }
+}
+
 impl AccentConfig {
     pub fn new(onnxruntime_dll: PathBuf) -> Self {
-        // 4..=8 ORT threads, leaving 4 cores free (capped by the machine). Measured on a 12-thread PC with the full
-        // chain (Hush + Accent + AutoGain, `accent_bench live`): 4 threads -> mic-thread p99 10.5 ms (over its 10 ms
-        // deadline), 2 underruns, +747 ms added delay (the jitter buffer grows after each underrun) and an RTF that
-        // sat close to the 0.9 pause limit; 8 threads -> p99 5.7 ms, 1 underrun, +477 ms. Override: CLEARNAI_ACCENT_THREADS.
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
-        let threads = std::env::var("CLEARNAI_ACCENT_THREADS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(cores.saturating_sub(4).clamp(4, 8).min(cores));
+        let threads = std::env::var("CLEARNAI_ACCENT_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| accent_threads_for_cores(cores));
         Self { models_dir: None, onnxruntime_dll, threads, jitter_ms: 100, initial_voice: ACCENT_OFF, prepare_models: None }
     }
 }
@@ -462,6 +471,14 @@ impl Leveler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accent_thread_tiers_by_core_count() {
+        let expect = [(0, 1), (1, 1), (2, 1), (3, 1), (4, 2), (5, 3), (6, 4), (8, 6), (9, 5), (12, 8), (16, 8), (64, 8)];
+        for (cores, threads) in expect {
+            assert_eq!(accent_threads_for_cores(cores), threads, "cores = {cores}");
+        }
+    }
 
     fn tone(amp: f32, n: usize) -> Vec<f32> {
         (0..n).map(|i| amp * (i as f32 * 0.05).sin()).collect()

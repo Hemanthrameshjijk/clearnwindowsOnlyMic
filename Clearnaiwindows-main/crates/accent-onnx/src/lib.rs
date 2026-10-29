@@ -5,6 +5,7 @@
 //! Signal path of [`AccentStream`]:  16 kHz mono -> [`logmel::StreamingLogMel`] -> [`converter::StreamingConverterV5`]
 //! -> [`vocoder::CausalStreamer`] -> 24 kHz mono. Fixed American voices only (no ECAPA / own-voice yet).
 
+pub mod causal_resampler;
 pub mod converter;
 pub mod logmel;
 pub mod npz;

@@ -10,7 +10,7 @@ use accent_onnx::resample::CausalUpsampler2x;
 use accent_onnx::{find_models_dir, init_runtime, AccentStream};
 use dsp_core::Stage;
 use std::path::PathBuf;
-use tse_bsrnn::causal_resampler::CausalDownsampler3x;
+use accent_onnx::causal_resampler::CausalDownsampler3x;
 
 fn read(p: &str) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()

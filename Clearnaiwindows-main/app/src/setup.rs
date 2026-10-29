@@ -64,12 +64,14 @@ const EMBEDDED_BPO_V1_MODEL_BYTES: &[u8] = include_bytes!("../assets/bpo_v1_onnx
 
 /// The official onnxruntime Windows x64 shared library (v1.19.2, from
 /// Microsoft's own `microsoft/onnxruntime` GitHub Releases), embedded
-/// directly into this binary from `app/assets/onnxruntime.dll` - needed
-/// only by `bvc_vanta::ecapa::VantaSpeakerEncoder` (the `ort` crate's
-/// `load-dynamic` mode; see that module's docs for why this model can't
-/// use `tract-onnx` like every other bundled model here). Same
-/// self-extraction pattern as `EMBEDDED_DLL_BYTES` above.
+/// directly into this binary from `app/assets/onnxruntime.dll` - needed by
+/// the accent-conversion and live-transcript models (the `ort` crate's
+/// `load-dynamic` mode). Same self-extraction pattern as
+/// `EMBEDDED_DLL_BYTES` above.
 const EMBEDDED_ONNXRUNTIME_DLL_BYTES: &[u8] = include_bytes!("../assets/onnxruntime.dll");
+
+/// On-disk file name of the extracted onnxruntime library.
+pub const ONNXRUNTIME_DLL_FILE_NAME: &str = "onnxruntime.dll";
 
 /// Result of the one-time, fast system compatibility check run at every
 /// launch (cheap enough to always redo, unlike the model download).
@@ -258,10 +260,9 @@ pub fn speaker_dll_path(app_data_dir: &Path) -> PathBuf {
 }
 
 /// Where `onnxruntime.dll` lives once extracted: under `app_data_dir()` -
-/// this is the `dll_dir` `bvc_vanta::ecapa::VantaSpeakerEncoder::try_load`
-/// is called with.
+/// the path the accent and transcript engines load it from.
 pub fn onnxruntime_dll_path(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join(bvc_vanta::ecapa::DLL_FILE_NAME)
+    app_data_dir.join(ONNXRUNTIME_DLL_FILE_NAME)
 }
 
 /// True only if the real bundle file exists and its content exactly
@@ -426,7 +427,7 @@ pub fn ensure_bvc_assets_extracted(target_dir: &Path) -> anyhow::Result<Extracti
     let bpo_v1_model = extract_one_if_needed(&bpo_v1_model_bundle_path(target_dir), EMBEDDED_BPO_V1_MODEL_BYTES)
         .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_hush::BPO_V1_MODEL_BUNDLE_FILE_NAME))?;
     let onnxruntime_dll = extract_one_if_needed(&onnxruntime_dll_path(target_dir), EMBEDDED_ONNXRUNTIME_DLL_BYTES)
-        .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", bvc_vanta::ecapa::DLL_FILE_NAME))?;
+        .map_err(|e| anyhow::anyhow!("failed to extract {}: {e:#}", ONNXRUNTIME_DLL_FILE_NAME))?;
     Ok(ExtractionOutcome { dll, speaker_dll, model, bpo_v1_model, onnxruntime_dll })
 }
 

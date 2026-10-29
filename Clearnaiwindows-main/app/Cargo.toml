@@ -11,6 +11,7 @@ path = "src/main.rs"
 # Portable foundation crate (bypass toggles, ring buffers, metrics). Builds
 # and its unit tests run on every platform.
 dsp-core = { path = "../crates/dsp-core" }
+aec = { path = "../crates/aec" }
 
 # DSP stages. All of these are portable Rust (no OS calls) except bvc-hush,
 # which dynamically loads a Windows DLL at runtime via `libloading` - the
@@ -33,30 +34,8 @@ audio-io = { path = "../crates/audio-io" }
 # real and tested before the harder kernel-mode half is attempted.
 driver-transport = { path = "../crates/driver-transport" }
 
-# Speaker-reference-enrollment subsystem (see docs/TSE_ENROLLMENT.md):
-# `speaker-profile` is the portable target-speaker-profile data type plus
-# the lock-free store the realtime TSE stage reads from; `enrollment` is the
-# non-realtime recording/VAD/encoder-calling state machine; `tse-engine` is
-# the BVC backend-selection router (Off/Hush/TSE) plus the TSE backend
-# trait and its `dsp_core::Stage` adapter. None of these are Windows-only -
-# they build and test natively on any platform, same as `dsp-core` itself.
-speaker-profile = { path = "../crates/speaker-profile" }
-speaker-encoder = { path = "../crates/speaker-encoder" }
-enrollment = { path = "../crates/enrollment" }
+# BVC backend routers (Off/Hush/DeepFilterNet/Hush-bpo_v1) for the mic and speaker paths.
 tse-engine = { path = "../crates/tse-engine" }
-
-# Real BSRNN-based streaming TSE backend (REAL-TSE/WeSep spk_emb_causal_100,
-# verified in poc/real_tse/ before this port - see that directory's
-# README.md/results.md for the real measurements, and tse-bsrnn's own crate
-# docs for what's verified vs. known-not-yet-fixed, particularly its
-# real-time performance gap).
-tse-bsrnn = { path = "../crates/tse-bsrnn" }
-
-# Vanta (Conv-TasNet + ECAPA-TDNN) target-speaker-extraction backend - see
-# that crate's docs for full honest status (real trained weights, but a
-# genuinely weak model; ECAPA runtime needs onnxruntime.dll shipped
-# alongside the app).
-bvc-vanta = { path = "../crates/bvc-vanta" }
 
 # Real-time accent conversion (Indian -> American English), ONNX Runtime based. Runs on its own worker thread;
 # the mic pipeline only exchanges samples with it through two lock-free rings (see that crate's `pipeline` docs).
@@ -73,7 +52,7 @@ serde_json = "1"
 # `Application` trait/`Sandbox` API from pre-0.13 iced no longer exists).
 # The `tokio` feature is required for `iced::time::every`, which drives the
 # ~250ms status/level-meter poll.
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "svg"] }
 
 # NOTE: the earlier `ureq` dependency for a first-run BVC model download has
 # been removed - both `weya_nc.dll` and the ONNX model bundle are now
@@ -86,8 +65,6 @@ iced = { version = "0.14", features = ["tokio"] }
 # Only for the `analyze_wav` diagnostic example - not part of the product
 # binary, does not affect `clearnairt.exe`'s own dependency set.
 hound = "3.5"
-# Only for the `fbank_verify` diagnostic example.
-kaldi-native-fbank = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 # Only needed for `setup.rs`'s real Windows compatibility checks:
@@ -97,3 +74,9 @@ kaldi-native-fbank = "0.1"
 # `crates/audio-io/Cargo.toml`) to avoid duplicate incompatible versions.
 windows = { version = "0.62", features = ["Wdk_System_SystemServices", "Wdk_Foundation", "Win32_System_SystemInformation"] }
 wasapi = "0.24"
+# System-tray icon for the "Minimize to tray" setting (see `src/tray.rs`). Exact pin: published 2026-10-07.
+tray-icon = { version = "=0.26.1", default-features = false }
+
+# Embeds assets/clearnai.ico into clearnairt.exe (Windows only; see build.rs).
+[build-dependencies]
+winresource = "=0.1.31"

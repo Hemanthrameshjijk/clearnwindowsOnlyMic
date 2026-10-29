@@ -1,20 +1,15 @@
-//! BVC backend abstraction (`BvcBackend`, `BvcRouterStage`) and the Target
-//! Speaker Extraction backend interface (`TseBackend`) plus its
-//! `dsp_core::Stage` bridge (`TseStageAdapter`).
+//! BVC backend routers: `BvcBackend`/`BvcRouterStage` for the mic path and
+//! `SpeakerBvcBackend`/`SpeakerBvcRouterStage` for the speaker path.
 //!
-//! This crate does not itself depend on `bvc-hush` - `BvcRouterStage` takes
-//! `hush`/`tse` as already-constructed, already-isolated (watchdog-wrapped)
-//! `Box<dyn dsp_core::Stage>` values, so it has no reason to know Hush's
-//! concrete type. The app crate (`engine.rs`) is what wires a real
-//! `bvc_hush::HushBvcStage` and a real (or, currently, `UnavailableTse`)
-//! `TseBackend` into one `BvcRouterStage` - see `docs/TSE_ENROLLMENT.md`.
+//! The crate name is historical (it used to also hold the Target Speaker
+//! Extraction backend interface, since removed). It does not itself depend on
+//! `bvc-hush` - the routers take already-constructed, already-isolated
+//! (watchdog-wrapped) `Box<dyn dsp_core::Stage>` values, so they have no
+//! reason to know Hush's concrete type. The app crate (`engine.rs`) wires the
+//! real stages into them.
 
-mod adapter;
-mod backend;
 mod router;
 mod speaker_router;
 
-pub use adapter::{TseMetrics, TseStageAdapter};
-pub use backend::{TseBackend, TseError, UnavailableTse};
 pub use router::{BvcBackend, BvcRouterStage};
 pub use speaker_router::{SpeakerBvcBackend, SpeakerBvcRouterStage};

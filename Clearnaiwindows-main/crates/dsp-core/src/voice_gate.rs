@@ -5,9 +5,8 @@
 //! from the mic than the primary speaker (a close-mic'd call-center agent
 //! vs. other agents' chatter in the background, for example). This cannot
 //! distinguish a background voice that is JUST AS LOUD as the primary
-//! speaker - that needs true speaker-targeted extraction (`tse_bsrnn`),
-//! which is real and correct but not yet fast enough to run live (see that
-//! crate's own docs).
+//! speaker - that would need true speaker-targeted extraction, which
+//! this project no longer includes.
 //!
 //! MUST run BEFORE `AutoGainStage` in the pipeline, not after: `AutoGainStage`
 //! boosts any quiet frame - including quiet background chatter when the

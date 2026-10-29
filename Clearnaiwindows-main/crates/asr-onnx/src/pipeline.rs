@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tse_bsrnn::causal_resampler::CausalDownsampler3x;
+use accent_onnx::causal_resampler::CausalDownsampler3x;
 
 const RESAMPLER_TAPS: usize = 97;
 const MAX_LINES: usize = 500;

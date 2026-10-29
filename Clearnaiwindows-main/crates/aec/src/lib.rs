@@ -83,7 +83,8 @@ impl AecEngine for DisabledAec {
 
 /// Number of adaptive filter taps used by [`build`]'s default `NlmsAec`.
 ///
-/// Chosen as 1024 taps = 1024/48000s ≈ 21.3ms of modeled echo-path length.
+/// Chosen as 2048 taps = 2048/48000s ≈ 43ms of modeled echo-path length (the reference is tapped before the
+/// render buffer, so the filter must also cover that output latency).
 /// Reasoning:
 ///   - The reference here is a *loopback* capture (what's being sent to the
 ///     speakers), not a separate microphone pointed at a speaker, so the
@@ -94,7 +95,7 @@ impl AecEngine for DisabledAec {
 ///     partitioned-block frequency-domain filter, to be tractable).
 ///   - Compute cost is O(n_taps) per sample for both the filter output and
 ///     the weight update, i.e. O(2 * n_taps * FRAME_SAMPLES) per 10ms frame.
-///     At 1024 taps that's ~1.0M float ops/frame, ~100M ops/sec sustained —
+///     At 1024 taps that was ~1.0M float ops/frame, ~100M ops/sec sustained —
 ///     trivial for a single modern core in a real-time budget, while a much
 ///     longer filter (e.g. 4800 taps for a 100ms tail) would be ~5x that and
 ///     would also converge proportionally slower (more free parameters to
@@ -104,7 +105,7 @@ impl AecEngine for DisabledAec {
 ///     tail length this design doesn't expect to need. If real hardware
 ///     testing shows the true loopback delay exceeds ~21ms, this constant
 ///     is the first thing to raise.
-pub const DEFAULT_TAPS: usize = 1024;
+pub const DEFAULT_TAPS: usize = 2048;
 
 /// Step size for the NLMS update. NLMS is stable for `0 < mu < 2`; `0.5` is
 /// a conservative middle ground that favors stability/robustness to the
@@ -143,6 +144,8 @@ pub struct NlmsAec {
     write_pos: usize,
     mu: f32,
     eps: f32,
+    /// Peak |reference| over the window as of the last frame; see the double-talk guard in `process`.
+    peak_hint: f32,
 }
 
 impl NlmsAec {
@@ -157,6 +160,7 @@ impl NlmsAec {
             write_pos: 0,
             mu,
             eps,
+            peak_hint: 0.0,
         }
     }
 
@@ -186,26 +190,63 @@ impl AecEngine for NlmsAec {
         debug_assert_eq!(mic.len(), reference.len());
         debug_assert_eq!(mic.len(), dsp_core::FRAME_SAMPLES);
         let n = self.n_taps;
+        // Running energy of the reference window, updated per sample (add the new sample, drop the oldest)
+        // instead of re-summing all `n` taps every sample. Rebuilt exactly once per frame so float error
+        // cannot accumulate.
+        let mut energy = self.eps + self.buf[self.write_pos..self.write_pos + n].iter().map(|h| h * h).sum::<f32>();
         for i in 0..mic.len() {
+            let oldest = self.buf[self.write_pos];
+            energy += reference[i] * reference[i] - oldest * oldest;
             self.push_reference(reference[i]);
             let start = self.write_pos;
             let window = &self.buf[start..start + n];
 
-            let mut y = 0.0f32;
-            let mut energy = self.eps;
-            for (t, &h) in self.taps.iter().zip(window.iter()) {
-                y += t * h;
-                energy += h * h;
-            }
-
+            let y = dot(&self.taps, window);
             let e = mic[i] - y;
-            let step = self.mu * e / energy;
-            for (t, &h) in self.taps.iter_mut().zip(window.iter()) {
-                *t += step * h;
-            }
 
+            // Double-talk guard (Geigel): adapt only while the mic is clearly quieter than the loudest recent
+            // reference sample. When you are talking over the call audio the mic is louder, and adapting then
+            // would train the filter to cancel your own voice. Silent reference: nothing to learn or cancel.
+            let ref_peak = self.peak_hint.max(reference[i].abs());
+            if energy > self.eps * 2.0 && mic[i].abs() < GEIGEL_THRESHOLD * ref_peak {
+                let step = self.mu * e / energy.max(self.eps);
+                axpy(&mut self.taps, window, step);
+            }
             mic[i] = e;
         }
+        // Peak of the reference over the filter window, refreshed once per frame (cheap) for the guard above.
+        self.peak_hint = self.buf[self.write_pos..self.write_pos + n].iter().fold(0.0f32, |m, &h| m.max(h.abs()));
+    }
+}
+
+/// Mic must be below this fraction of the recent reference peak for the filter to adapt (Geigel threshold).
+const GEIGEL_THRESHOLD: f32 = 1.0;
+
+/// Dot product with 8 independent accumulators so the compiler can vectorize it (a single running sum cannot be
+/// reordered under strict float rules).
+#[inline]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let ca = a.chunks_exact(8);
+    let cb = b.chunks_exact(8);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let mut sum: f32 = acc.iter().sum();
+    for (x, y) in ra.iter().zip(rb) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// `t += step * h`, element-wise.
+#[inline]
+fn axpy(t: &mut [f32], h: &[f32], step: f32) {
+    for (t, &h) in t.iter_mut().zip(h) {
+        *t += step * h;
     }
 }
 

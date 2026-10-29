@@ -92,17 +92,30 @@ impl MicCapture {
                 // here (device disabled/removed, sleep/wake) used to
                 // permanently kill mic capture until the app was restarted.
                 // Retry with a backoff instead.
+                let mut failed_attempts: u32 = 0;
                 while !thread_stop.load(Ordering::Relaxed) {
+                    let started = std::time::Instant::now();
                     if let Err(e) = capture_loop(&device_id, &mut producer, &thread_stop, &counters) {
-                        crate::report_error(&format!(
-                            "[audio-io] mic capture thread error, retrying in {}s: {e:#}",
-                            RECONNECT_BACKOFF.as_secs()
-                        ));
+                        // A session that streamed for a while before dying starts the count over; a device
+                        // that never opens (unplugged, stale id) fails identically each time, so say so on
+                        // the first failure and then about once a minute.
+                        if started.elapsed() > std::time::Duration::from_secs(10) {
+                            failed_attempts = 0;
+                        }
+                        failed_attempts += 1;
+                        if failed_attempts == 1 || failed_attempts % 12 == 0 {
+                            crate::report_error(&format!(
+                                "[audio-io] mic capture thread error (attempt {failed_attempts}), retrying: {e:#}"
+                            ));
+                        }
                     }
                     if thread_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    sleep_respecting_stop(RECONNECT_BACKOFF, &thread_stop);
+                    // Quick retries first (recovers a brief glitch within 2 s), then every 5 s for a device
+                    // that is simply gone.
+                    let backoff = if failed_attempts <= 3 { RECONNECT_BACKOFF } else { RECONNECT_BACKOFF * 5 / 2 };
+                    sleep_respecting_stop(backoff, &thread_stop);
                 }
             })
             .context("spawning mic capture thread")?;

@@ -13,10 +13,10 @@ pub struct StatusColor {
 
 pub fn status_label(status: RealtimeStatus) -> &'static str {
     match status {
-        RealtimeStatus::RealTime => "Real-time",
-        RealtimeStatus::Degraded => "Degraded",
-        RealtimeStatus::Overloaded => "Overloaded",
-        RealtimeStatus::Bypass => "Bypass",
+        RealtimeStatus::RealTime => "Running smoothly",
+        RealtimeStatus::Degraded => "Slightly delayed",
+        RealtimeStatus::Overloaded => "Falling behind",
+        RealtimeStatus::Bypass => "Not processing",
     }
 }
 

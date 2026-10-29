@@ -22,12 +22,17 @@
 
 #![windows_subsystem = "windows"]
 
+#[cfg_attr(not(windows), allow(dead_code))]
+mod device_rules;
 mod gui;
 mod logging;
 mod settings;
 mod setup;
 mod shared;
 mod status_ui;
+mod sysutil;
+mod tray;
+mod ui_logic;
 
 #[cfg(windows)]
 mod engine;
@@ -36,23 +41,27 @@ mod engine;
 fn bootstrap(settings: &settings::Settings) -> gui::Initial {
     let devices = engine::enumerate_devices();
 
-    let mic_target = settings
-        .virtual_mic_target_id
-        .clone()
-        .or_else(|| engine::default_virtual_mic_target(&devices));
-    // Like the Monitor, the speaker path is never auto-picked: with a single
-    // VB-Cable pair the only candidate is "CABLE Output", the other end of the
-    // cable the mic path renders into, so the speaker path would capture the
-    // user's own processed voice, run Noise/BVC/Studio on it and play it back
-    // out of the speakers (an echo, plus wasted CPU). It stays off until the
-    // user picks a speaker source (see docs/VIRTUAL_DEVICES.md).
-    let speaker_source = settings.virtual_speaker_source_id.clone();
-    // `None` means "system default output device" here, unlike the two
-    // virtual-cable roles above (which need an unambiguous match or stay
-    // unset) - this is the user's real physical speakers/headphones, same
-    // "None = system default" convention as `monitor_device_id`/
-    // `recording_playback_device_id`.
-    let real_speaker_output = settings.real_speaker_output_device_id.clone();
+    // Check the saved device choices against what is installed right now: a wrong or unplugged device falls
+    // back to automatic instead of silently misrouting audio (a physical mic saved as the call audio source
+    // used to play the user's own voice out of the speakers).
+    let resolved = device_rules::resolve(settings, &devices, engine::default_virtual_mic_target(&devices));
+    for note in &resolved.notes {
+        crate::log_info!("[clearnairt] devices: {note}");
+    }
+    if resolved.changed {
+        if let Err(e) = settings::save(&resolved.settings) {
+            crate::log_error!("[clearnairt] failed to save corrected device settings: {e:#}");
+        }
+    }
+    let mic_target = resolved.mic_target.clone();
+    // Like the Monitor, the speaker path is never auto-picked: with a single VB-Cable pair the only candidate is
+    // "CABLE Output", the other end of the cable the mic path renders into, so the speaker path would capture
+    // the user's own processed voice and play it back out of the speakers. It stays off until a separate cable
+    // is picked (see docs/VIRTUAL_DEVICES.md).
+    let speaker_source = resolved.speaker_source.clone();
+    // `None` means "system default output device".
+    let real_speaker_output = resolved.real_output.clone();
+    let settings = &resolved.settings;
 
     // Fast, synchronous checks - both cheap enough to redo on every launch
     // rather than caching/skipping them (see `setup::CompatibilityReport`
@@ -100,8 +109,6 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
             // engine handle set makes the failure visible (status stays
             // Bypass, no audio flows) instead of the whole app vanishing
             // with no explanation.
-            let (_tap, target_speaker_store, enrollment, _enrollment_warning, tse_speaker_store, vanta_speaker_store) =
-                shared::build_enrollment_subsystem();
             let handles = shared::EngineHandles::new_from_settings(
                 settings,
                 false,
@@ -115,14 +122,6 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
                 Some("engine failed to start; see stderr log".to_string()),
                 false,
                 Some("engine failed to start; see stderr log".to_string()),
-                false,
-                Some("engine failed to start; see stderr log".to_string()),
-                false,
-                Some("engine failed to start; see stderr log".to_string()),
-                target_speaker_store,
-                tse_speaker_store,
-                vanta_speaker_store,
-                enrollment,
             );
             gui::Initial {
                 settings: settings.clone(),
@@ -145,8 +144,6 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
     // exercises this path, even though it's never real on this platform.
     let bvc_dir = setup::app_data_dir();
     let bvc_extraction_error = setup::ensure_bvc_assets_extracted(&bvc_dir).err().map(|e| format!("{e:#}"));
-    let (_tap, target_speaker_store, enrollment, _enrollment_warning, tse_speaker_store, vanta_speaker_store) =
-        shared::build_enrollment_subsystem();
     let handles = shared::EngineHandles::new_from_settings(
         settings,
         false,
@@ -160,14 +157,6 @@ fn bootstrap(settings: &settings::Settings) -> gui::Initial {
         Some("not running on Windows".to_string()),
         false,
         Some("not running on Windows".to_string()),
-        false,
-        Some("not running on Windows".to_string()),
-        false,
-        Some("not running on Windows".to_string()),
-        target_speaker_store,
-        tse_speaker_store,
-        vanta_speaker_store,
-        enrollment,
     );
     gui::Initial {
         settings: settings.clone(),
@@ -228,7 +217,12 @@ fn main() -> iced::Result {
     // partner kept logging generic "buffer full, dropping frame" errors
     // forever with no visible root cause. Redirect them into the same
     // file-backed logger everything else in this crate uses.
-    audio_io::set_error_sink(|msg| crate::log_error!("{msg}"));
+    // audio-io reports everything through one channel; route its informational notes to INFO so the log's
+    // ERROR lines are real errors only.
+    audio_io::set_error_sink(|msg| match msg.split_once("] INFO: ") {
+        Some((_, note)) => crate::log_info!("[audio-io] {note}"),
+        None => crate::log_error!("{msg}"),
+    });
 
     let settings = settings::load();
     let initial = bootstrap(&settings);

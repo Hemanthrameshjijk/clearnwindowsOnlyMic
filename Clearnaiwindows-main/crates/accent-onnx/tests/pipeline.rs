@@ -7,7 +7,7 @@ use accent_onnx::{find_models_dir, init_runtime, AccentStream};
 use dsp_core::Stage;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tse_bsrnn::causal_resampler::{CausalDownsampler3x, CausalUpsampler3x};
+use accent_onnx::causal_resampler::{CausalDownsampler3x, CausalUpsampler3x};
 
 fn dll() -> PathBuf {
     std::env::var("ORT_DLL").map(PathBuf::from).unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/assets/onnxruntime.dll"))
