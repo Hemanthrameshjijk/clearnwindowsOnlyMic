@@ -230,7 +230,7 @@ impl Default for Settings {
             transcript_on: false,
             compact_mode: false,
             theme_dark: false,
-            start_with_windows: false,
+            start_with_windows: true,
             minimize_to_tray: false,
             profile: String::new(),
         }
@@ -292,7 +292,10 @@ pub fn save(settings: &Settings) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let text = serde_json::to_string_pretty(settings)?;
-    std::fs::write(&path, text)?;
+    // Write a temp file and rename it over the real one, so a crash mid-write never leaves half a settings file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

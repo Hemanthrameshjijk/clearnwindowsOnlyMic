@@ -137,6 +137,34 @@ impl TranscriptHandle {
         (d.lines[from..].to_vec(), d.partial.clone())
     }
 
+    /// For a handle that mirrors an engine running in another process: applies the engine's state plus the lines that
+    /// are new since the last call (`reset` = the engine cleared its transcript, so start over). `enabled` is not
+    /// touched (the UI owns it).
+    pub fn apply_remote(&self, state: TranscriptState, message: &str, rtf: f32, reset: bool, new_lines: Vec<TranscriptLine>, partial: &str) {
+        self.0.state.store(
+            match state {
+                TranscriptState::Off => S_OFF,
+                TranscriptState::Loading => S_LOADING,
+                TranscriptState::Listening => S_LISTENING,
+                TranscriptState::Transcribing => S_TRANSCRIBING,
+                TranscriptState::Unavailable => S_UNAVAILABLE,
+            },
+            Relaxed,
+        );
+        self.0.rtf_milli.store((rtf * 1000.0) as u32, Relaxed);
+        let mut d = self.0.data.lock().unwrap();
+        let changed = reset || !new_lines.is_empty() || d.partial != partial;
+        if reset {
+            d.lines.clear();
+        }
+        d.lines.extend(new_lines);
+        d.partial = partial.to_string();
+        d.message = message.to_string();
+        if changed {
+            self.0.version.fetch_add(1, Relaxed);
+        }
+    }
+
     /// Whole transcript as plain text (for copy).
     pub fn full_text(&self) -> String {
         let d = self.0.data.lock().unwrap();

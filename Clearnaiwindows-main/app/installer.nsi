@@ -22,7 +22,9 @@
 ; already produced target\release\clearnairt.exe two directories up.
 
 !define APP_NAME "ClearNAI"
-!define APP_EXE "clearnairt.exe"
+; Two programs (see app/src/lib.rs): the window and the background engine that keeps the audio running.
+!define APP_EXE "clearnai.exe"
+!define ENGINE_EXE "clearnai-engine.exe"
 !define APP_PUBLISHER "ClearNAI"
 !define APP_VERSION "0.1.0"
 !define UNINSTALL_REG_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
@@ -75,7 +77,8 @@ Function .onInit
   ${EndIf}
 FunctionEnd
 
-Page directory
+; Fixed install folder (no directory page): the app keeps its settings, log and models in this same folder and the
+; uninstaller removes the whole folder, so letting the user pick a shared folder such as Documents would be dangerous.
 Page instfiles
 
 UninstPage uninstConfirm
@@ -85,7 +88,14 @@ Section "Install"
   SetOutPath "$INSTDIR"
   ; Built by the `cargo build --release` step that runs immediately before
   ; this one in CI (see .github/workflows/windows.yml).
+  ; Stop a running copy first (an update, or the old single-exe build), otherwise its files are locked.
+  nsExec::Exec 'taskkill /F /IM ${ENGINE_EXE}'
+  nsExec::Exec 'taskkill /F /IM ${APP_EXE}'
+  nsExec::Exec 'taskkill /F /IM clearnairt.exe'
+  Sleep 1000
+  Delete "$INSTDIR\clearnairt.exe"
   File "..\target\release\${APP_EXE}"
+  File "..\target\release\${ENGINE_EXE}"
 
   ; Accent-conversion model bundle (~270 MB), shipped as a folder next to the exe and installed into
   ; %LOCALAPPDATA%\ClearNAI\app_models on first use (setup.rs compares full contents). Put the files in
@@ -121,6 +131,10 @@ Section "Install"
   WriteINIStr "$SMPROGRAMS\${APP_NAME}\Get VB-CABLE A+B (call audio).url" "InternetShortcut" "URL" "https://vb-audio.com/Cable/"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+  ; Start the background engine (hidden, in the tray) at every sign-in. The engine keeps this entry in line with the
+  ; "Start with Windows" switch in Advanced.
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}" '"$INSTDIR\${ENGINE_EXE}" --background'
 
   ; Per-user uninstall registry entry (HKCU, not HKLM - matches
   ; RequestExecutionLevel user above) so ClearNAI shows up in Windows'
@@ -204,7 +218,18 @@ Section "VB-CABLE Virtual Audio Driver"
   skip_vbcable:
 SectionEnd
 
+; After everything is installed (including the optional driver step): start the engine, which opens the window once.
+Function .onInstSuccess
+  ${IfNot} ${Silent}
+    Exec '"$INSTDIR\${ENGINE_EXE}"'
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
+  nsExec::Exec 'taskkill /F /IM ${APP_EXE}'
+  nsExec::Exec 'taskkill /F /IM ${ENGINE_EXE}'
+  nsExec::Exec 'taskkill /F /IM clearnairt.exe'
+  Sleep 1000
   ; $INSTDIR is also where the running app self-extracts weya_nc.dll, the
   ; ONNX model bundle, settings.json, and clearnai.log (see
   ; app/src/setup.rs::app_data_dir) - removing the whole directory cleans

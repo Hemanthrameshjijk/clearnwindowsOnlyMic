@@ -70,7 +70,13 @@ static LOGGER: OnceLock<Option<Logger>> = OnceLock::new();
 /// Must be called once, as the very first thing in `main()`, before any
 /// other code in this crate might log. `dir` is `setup::app_data_dir()`.
 pub fn init(dir: &Path) {
-    let _ = LOG_PATH.set(Some(dir.join("clearnai.log")));
+    init_named(dir, "clearnai.log");
+}
+
+/// Same as [`init`] with a chosen file name: the window and the engine are separate processes and each writes its own
+/// log (`clearnai-window.log` / `clearnai.log`) so their lines never interleave in one file.
+pub fn init_named(dir: &Path, file_name: &str) {
+    let _ = LOG_PATH.set(Some(dir.join(file_name)));
 }
 
 fn timestamp() -> String {

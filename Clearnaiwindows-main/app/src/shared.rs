@@ -324,6 +324,9 @@ pub struct EngineHandles {
     /// construction, once the actual WASAPI threads/ring buffers it needs to
     /// switch between exist.
     pub device_switcher: Arc<dyn LiveDeviceSwitcher>,
+    /// `Some` only in the window process, where these handles are a mirror of the engine's (see `remote.rs`); `None`
+    /// inside the engine itself.
+    pub remote: Option<Arc<RemoteLive>>,
 }
 
 impl EngineHandles {
@@ -387,12 +390,87 @@ impl EngineHandles {
             level: Arc::new(LevelMeter::new()),
             input_level: Arc::new(LevelMeter::new()),
             device_switcher: Arc::new(NoOpDeviceSwitcher),
+            remote: None,
+        }
+    }
+
+    /// Every on/off switch, in the fixed order used by `ipc::Status::toggles` / `ClientMsg::Toggle::key`.
+    pub fn toggles(&self) -> [&StageToggle; crate::ipc::TOGGLE_COUNT] {
+        [
+            &self.mic_noise,
+            &self.mic_voice_gate,
+            &self.echo_cancel,
+            &self.mic_bvc,
+            &self.mic_studio,
+            &self.speaker_noise,
+            &self.speaker_bvc,
+            &self.speaker_studio,
+            &self.mic_master_enabled,
+            &self.speaker_master_enabled,
+            &self.monitor,
+        ]
+    }
+
+    /// Every small-number selector, in the fixed order used by `ipc::Status::presets` / `ClientMsg::Preset::key`.
+    pub fn presets(&self) -> [&SharedPreset; crate::ipc::PRESET_COUNT] {
+        [&self.mic_studio_preset, &self.speaker_studio_preset, &self.bvc_backend, &self.speaker_bvc_backend]
+    }
+}
+
+/// `FrameCounters` as a plain array (declaration order), for sending over the pipe.
+pub fn counters_to_array(c: &FrameCounters) -> [u64; 8] {
+    use std::sync::atomic::Ordering::Relaxed;
+    [
+        c.frames_processed.load(Relaxed),
+        c.dropped_frames.load(Relaxed),
+        c.deadline_misses.load(Relaxed),
+        c.input_underruns.load(Relaxed),
+        c.input_overruns.load(Relaxed),
+        c.output_underruns.load(Relaxed),
+        c.output_overruns.load(Relaxed),
+        c.transcript_dropped.load(Relaxed),
+    ]
+}
+
+/// Inverse of [`counters_to_array`] (the window's mirror counters).
+pub fn counters_from_array(c: &FrameCounters, a: &[u64; 8]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    c.frames_processed.store(a[0], Relaxed);
+    c.dropped_frames.store(a[1], Relaxed);
+    c.deadline_misses.store(a[2], Relaxed);
+    c.input_underruns.store(a[3], Relaxed);
+    c.input_overruns.store(a[4], Relaxed);
+    c.output_underruns.store(a[5], Relaxed);
+    c.output_overruns.store(a[6], Relaxed);
+    c.transcript_dropped.store(a[7], Relaxed);
+}
+
+/// Live values the window gets from the engine that have no counterpart in the engine's own handles.
+pub struct RemoteLive {
+    pub mic_pct: std::sync::Mutex<dsp_core::Percentiles>,
+    pub speaker_pct: std::sync::Mutex<dsp_core::Percentiles>,
+    /// Engine CPU in tenths of a percent; `u32::MAX` = not measured yet.
+    pub cpu_tenths: std::sync::atomic::AtomicU32,
+    /// False while the pipe to the engine is down (the window shows a banner).
+    pub connected: std::sync::atomic::AtomicBool,
+    /// The engine said it is quitting.
+    pub shutdown: std::sync::atomic::AtomicBool,
+}
+
+impl RemoteLive {
+    pub fn new() -> Self {
+        Self {
+            mic_pct: Default::default(),
+            speaker_pct: Default::default(),
+            cpu_tenths: std::sync::atomic::AtomicU32::new(u32::MAX),
+            connected: std::sync::atomic::AtomicBool::new(true),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
 /// One enumerated WASAPI endpoint, as shown in a GUI device picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceOption {
     pub id: String,
     pub label: String,
@@ -408,7 +486,7 @@ impl std::fmt::Display for DeviceOption {
 /// Empty on any platform where enumeration isn't available (non-Windows, or
 /// a real enumeration failure) - the GUI must degrade to "no devices
 /// listed", never crash.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeviceList {
     pub render: Vec<DeviceOption>,
     pub capture: Vec<DeviceOption>,

@@ -65,6 +65,13 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 3;
 pub struct WatchdogStatus(Arc<AtomicBool>);
 
 impl WatchdogStatus {
+    /// A status that is not driven by a local watchdog but mirrors one running in another process: the returned
+    /// flag is what the mirror sets.
+    pub fn mirror() -> (Self, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(false));
+        (Self(flag.clone()), flag)
+    }
+
     /// True once the wrapped stage has been permanently bypassed (either
     /// `MAX_CONSECUTIVE_TIMEOUTS` stalls in a row, or its worker thread
     /// died/disconnected) - from that point on, `WatchdogStage::process`

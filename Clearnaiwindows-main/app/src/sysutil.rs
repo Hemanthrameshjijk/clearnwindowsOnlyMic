@@ -13,9 +13,25 @@ pub fn take_hotkey_pressed() -> bool {
     HOTKEY_PRESSED.swap(false, Ordering::Relaxed)
 }
 
-/// What Windows should launch at sign-in: the quoted exe path.
+/// What Windows should launch at sign-in: the quoted engine exe path, started hidden in the background.
 pub fn run_value(exe: &Path) -> String {
-    format!("\"{}\"", exe.display())
+    format!("\"{}\" --background", exe.display())
+}
+
+/// Ends this process at once. A normal exit runs DLL detach for onnxruntime and the audio libraries, which was
+/// observed to spin and hang ("Not responding" in the background), and dropping the audio engine joins threads that
+/// can be stuck on an invalid device; TerminateProcess ends the process immediately.
+pub fn terminate_process() -> ! {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn TerminateProcess(h: isize, code: u32) -> i32;
+        }
+        unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+    }
+    std::process::exit(0);
 }
 
 /// Process CPU use as a percentage of the whole machine (all cores), from CPU time and wall time over one interval,
@@ -256,7 +272,7 @@ mod tests {
     #[test]
     fn run_value_quotes_the_exe_path() {
         let v = run_value(Path::new(r"C:\Users\Dev eloper\AppData\Local\ClearNAI\clearnairt.exe"));
-        assert!(v.starts_with('"') && v.ends_with('"'));
+        assert!(v.starts_with('"') && v.ends_with("\" --background"));
         assert!(v.contains("Dev eloper"));
         assert!(v.contains("clearnairt.exe"));
     }

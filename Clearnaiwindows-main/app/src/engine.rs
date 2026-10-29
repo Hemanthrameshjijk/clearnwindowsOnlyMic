@@ -860,9 +860,8 @@ pub fn start(
         }
         None => {
             warnings.push(
-                "No speaker-source device selected - incoming-call audio is not being captured for \
-                 cleanup. Install a second, independent virtual audio cable (e.g. VB-CABLE A+B) and \
-                 select its capture endpoint in the GUI (see docs/VIRTUAL_DEVICES.md)."
+                "No speaker-source device selected - Incoming call audio is not being captured for cleanup. Choose a second, \
+                 independent virtual audio cable in Devices."
                     .to_string(),
             );
             (None, None)

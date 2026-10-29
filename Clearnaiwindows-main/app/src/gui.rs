@@ -23,17 +23,18 @@ use crate::shared::{
     studio_preset_to_index, DeviceList, DeviceOption,
     EngineHandles, STUDIO_PRESET_NAMES,
 };
-use crate::status_ui::{status_color, status_label};
 use dsp_core::{classify_status, compute_percentiles, RealtimeStatus};
 use tse_engine::BvcBackend;
 use crate::ui_logic::Tab;
-use iced::widget::{button, column, container, pick_list, row, scrollable, text};
+use iced::widget::{button, column, row, scrollable, text};
 use iced::{Color, Element, Subscription};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod icons;
+mod style;
 mod tabs;
 
 /// Frame deadline in nanoseconds (10ms @ 48kHz), matching `dsp_core`'s frame
@@ -48,6 +49,8 @@ const DEADLINE_NS: u64 = (dsp_core::FRAME_SAMPLES as u64 * 1_000_000_000) / dsp_
 /// bolted in front of it never changes `engine.rs`'s bootstrap timing, it
 /// only changes which screen is shown first.
 pub struct Initial {
+    /// Opened from the tray as the quick panel: place it at the bottom-right of the screen on the first tick.
+    pub panel_at_start: bool,
     pub settings: Settings,
     pub handles: EngineHandles,
     pub devices: DeviceList,
@@ -115,12 +118,17 @@ struct MainState {
     /// is the confirming one (cleared when the tab changes).
     diag_note: Option<String>,
     reset_armed: bool,
-    cpu: crate::sysutil::CpuSampler,
     cpu_percent: Option<f32>,
     /// Problems to show as a banner (every tab and the collapsed bar); `logged_alerts` remembers which keys were
     /// already written to the log so each problem is logged once when it appears and once when it clears.
     alerts: Vec<crate::ui_logic::Alert>,
     logged_alerts: Vec<&'static str>,
+    /// Opened from the tray as the quick panel: move it to the bottom-right of the screen on the first tick.
+    place_panel: bool,
+    /// A full window was just opened: shrink it to the screen if the default is too big.
+    fit_full: bool,
+    /// Whether the window currently has its title bar (the collapsed bar has none).
+    decorated: bool,
 }
 
 impl MainState {
@@ -151,10 +159,12 @@ impl MainState {
             transcript_note: None,
             diag_note: None,
             reset_armed: false,
-            cpu: crate::sysutil::CpuSampler::new(),
             cpu_percent: None,
             alerts: Vec::new(),
             logged_alerts: Vec::new(),
+            place_panel: false,
+            fit_full: false,
+            decorated: true,
         }
     }
 }
@@ -279,6 +289,10 @@ pub enum Message {
     ToggleSpeakerMasterEnabled(bool),
     /// Switches between the full window and the compact always-on-top bar (persisted).
     ToggleCompact,
+    /// Press on the undecorated collapsed bar: drag the window.
+    DragWindow,
+    /// Open the full window on this tab (the collapsed bar's gear).
+    OpenFullAt(Tab),
     SelectTab(Tab),
     /// Mute / unmute the mic path (flips `EngineHandles::mic_master_enabled`); also driven by Ctrl+Shift+M.
     ToggleMute,
@@ -292,8 +306,6 @@ pub enum Message {
     OpenTranscriptFolder,
     ToggleDarkTheme(bool),
     ToggleStartWithWindows(bool),
-    /// "Minimize to tray" on/off (handled in `update`: it also starts/stops the tray icon).
-    ToggleMinimizeToTray(bool),
     ExportLogs,
     /// First click arms, second click (without changing tab) resets processing settings to their defaults.
     ResetDefaults,
@@ -301,8 +313,11 @@ pub enum Message {
     OpenInstallGuide,
 }
 
-const FULL_WINDOW_SIZE: iced::Size = iced::Size::new(560.0, 720.0);
-const COMPACT_WINDOW_SIZE: iced::Size = iced::Size::new(400.0, 250.0);
+const FULL_WINDOW_SIZE: iced::Size = iced::Size::new(940.0, 620.0);
+
+/// Smallest the full window can be dragged to (below ~760 px wide it switches to top tabs).
+const MIN_WINDOW_SIZE: iced::Size = iced::Size::new(480.0, 400.0);
+const COMPACT_WINDOW_SIZE: iced::Size = iced::Size::new(490.0, 84.0);
 
 fn window_size_and_level(compact: bool) -> (iced::Size, iced::window::Level) {
     if compact {
@@ -312,10 +327,49 @@ fn window_size_and_level(compact: bool) -> (iced::Size, iced::window::Level) {
     }
 }
 
-fn persist(settings: &Settings) {
-    if let Err(e) = crate::settings::save(settings) {
-        crate::log_error!("[clearnairt] failed to persist settings: {e:#}");
+/// Moves the window to the bottom-right of the screen, above the taskbar (where the tray icon is).
+fn place_panel_task(size: iced::Size) -> iced::Task<Message> {
+    iced::window::latest().and_then(move |id| {
+        iced::window::monitor_size(id).and_then(move |screen| {
+            let x = (screen.width - size.width - 16.0).max(0.0);
+            let y = (screen.height - size.height - 64.0).max(0.0);
+            iced::window::move_to(id, iced::Point::new(x, y))
+        })
+    })
+}
+
+/// Sizes the full window to FULL_WINDOW_SIZE but never larger than the screen allows (room is left for the title bar
+/// and the taskbar), then centres it.
+fn fit_full_task() -> iced::Task<Message> {
+    iced::window::latest().and_then(move |id| {
+        iced::window::monitor_size(id).and_then(move |screen| {
+            let w = FULL_WINDOW_SIZE.width.min((screen.width - 60.0).max(MIN_WINDOW_SIZE.width));
+            let h = FULL_WINDOW_SIZE.height.min((screen.height - 140.0).max(MIN_WINDOW_SIZE.height));
+            let x = ((screen.width - w) / 2.0).max(0.0);
+            let y = ((screen.height - h) / 2.0 - 24.0).max(0.0);
+            iced::Task::batch([iced::window::resize(id, iced::Size::new(w, h)), iced::window::move_to(id, iced::Point::new(x, y))])
+        })
+    })
+}
+
+/// Everything that switches the window between the collapsed bar and the full window: size, always-on-top, title bar,
+/// and where it sits (bottom-right by the tray for the bar, centre of the screen for the full window).
+fn mode_tasks(state: &mut MainState, compact: bool) -> Vec<iced::Task<Message>> {
+    let (size, level) = window_size_and_level(compact);
+    let mut tasks = vec![iced::window::latest().and_then(move |id| {
+        iced::Task::batch([iced::window::resize(id, size), iced::window::set_level(id, level)])
+    })];
+    if state.decorated == compact {
+        state.decorated = !compact;
+        tasks.push(iced::window::latest().and_then(iced::window::toggle_decorations));
     }
+    tasks.push(if compact { place_panel_task(size) } else { fit_full_task() });
+    tasks
+}
+
+/// The engine is the only writer of `settings.json`: send it the window's settings and it saves them.
+fn persist(settings: &Settings) {
+    crate::remote::save_settings(settings);
 }
 
 /// Runs a `LiveDeviceSwitcher` call on a background thread rather than
@@ -364,57 +418,62 @@ fn next_seq(seq: &AtomicU64) -> u64 {
 /// handles the one-way `Setup -> Main` transition when `update_setup`
 /// reports the user is done with the setup screen.
 fn update(screen: &mut Screen, message: Message) -> iced::Task<Message> {
-    if let Message::ToggleMinimizeToTray(on) = message {
-        if let Screen::Main(state) = screen {
-            state.settings.minimize_to_tray = on;
-            persist(&state.settings);
-            if on {
-                crate::tray::start();
-            } else {
-                crate::tray::stop();
-            }
-        }
-        return iced::Task::none();
-    }
-    // With "Minimize to tray" on, closing the window hides it (the process and the audio keep running); the tray's
-    // Open / Quit bring it back / end the app.
-    if matches!(message, Message::WindowClosed) {
-        if let Screen::Main(state) = screen {
-            if state.settings.minimize_to_tray {
-                crate::tray::start();
-                return iced::window::latest().and_then(|id| iced::window::set_mode(id, iced::window::Mode::Hidden));
-            }
-        }
-    }
-    // Tray menu / icon clicks, polled with the regular tick (like the mute hotkey).
+    // Another launch of the window (tray "Open", the Start menu) asks this one to come to the front.
     if matches!(message, Message::Tick) {
         if let Screen::Main(state) = screen {
             let mut tasks = Vec::new();
-            for action in crate::tray::take_actions() {
-                match action {
-                    crate::tray::TrayAction::Open => tasks.push(iced::window::latest().and_then(|id| {
-                        iced::Task::batch([
-                            iced::window::set_mode(id, iced::window::Mode::Windowed),
-                            iced::window::minimize(id, false),
-                            iced::window::gain_focus(id),
-                        ])
-                    })),
-                    crate::tray::TrayAction::ToggleMute => update_main(state, Message::ToggleMute),
-                    crate::tray::TrayAction::Quit => terminate_process(),
+            // Opened from the tray as the quick panel: put it by the tray (bottom-right), once.
+            if std::mem::take(&mut state.place_panel) {
+                tasks.push(place_panel_task(COMPACT_WINDOW_SIZE));
+            }
+            // First tick of a full window: make sure it fits this screen.
+            if std::mem::take(&mut state.fit_full) {
+                tasks.push(fit_full_task());
+            }
+            // Another launch of the window (tray, Start menu) asks this one to come to the front, as the quick
+            // panel or as the full window.
+            if let Some(mode) = crate::remote::take_show_request() {
+                let compact = mode == crate::ipc::ShowMode::Panel;
+                if state.settings.compact_mode != compact {
+                    state.settings.compact_mode = compact;
+                    persist(&state.settings);
+                    tasks.extend(mode_tasks(state, compact));
+                } else if compact {
+                    tasks.push(place_panel_task(COMPACT_WINDOW_SIZE));
                 }
+                tasks.push(iced::window::latest().and_then(|id| {
+                    iced::Task::batch([
+                        iced::window::set_mode(id, iced::window::Mode::Windowed),
+                        iced::window::minimize(id, false),
+                        iced::window::gain_focus(id),
+                    ])
+                }));
             }
             update_main(state, message);
             return iced::Task::batch(tasks);
         }
     }
+    if matches!(message, Message::DragWindow) {
+        return iced::window::latest().and_then(iced::window::drag);
+    }
+    if let Message::OpenFullAt(tab) = message {
+        if let Screen::Main(state) = screen {
+            state.tab = tab;
+            state.reset_armed = false;
+            if state.settings.compact_mode {
+                state.settings.compact_mode = false;
+                persist(&state.settings);
+                return iced::Task::batch(mode_tasks(state, false));
+            }
+        }
+        return iced::Task::none();
+    }
     if matches!(message, Message::ToggleCompact) {
         if let Screen::Main(state) = screen {
             state.settings.compact_mode = !state.settings.compact_mode;
             persist(&state.settings);
-            let (size, level) = window_size_and_level(state.settings.compact_mode);
-            return iced::window::latest().and_then(move |id| {
-                iced::Task::batch([iced::window::resize(id, size), iced::window::set_level(id, level)])
-            });
+            let compact = state.settings.compact_mode;
+            return iced::Task::batch(mode_tasks(state, compact));
         }
         return iced::Task::none();
     }
@@ -439,27 +498,14 @@ fn update(screen: &mut Screen, message: Message) -> iced::Task<Message> {
     iced::Task::none()
 }
 
-/// Ends the app at once. Letting iced unwind normally drops the audio engine, whose capture/render drops join their
-/// threads; a thread stuck on an invalid device (or a model run) then leaves a hung "Not responding" clearnairt.exe in
-/// the background. Settings are saved when changed.
+/// Closing the window ends only this process: the engine keeps the audio running in the background.
 fn terminate_process() -> ! {
-    #[cfg(windows)]
-    {
-        // ExitProcess runs DLL detach for onnxruntime/audio libraries, which was observed to spin and hang;
-        // TerminateProcess ends the process immediately.
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetCurrentProcess() -> isize;
-            fn TerminateProcess(h: isize, code: u32) -> i32;
-        }
-        unsafe { TerminateProcess(GetCurrentProcess(), 0) };
-    }
-    std::process::exit(0);
+    crate::sysutil::terminate_process()
 }
 
 fn update_inner(screen: &mut Screen, message: Message) {
     if matches!(message, Message::WindowClosed) {
-        crate::log_error!("[clearnairt] window close requested - terminating process");
+        crate::log_info!("[clearnairt] window closed");
         terminate_process();
     }
     let transition = match screen {
@@ -536,6 +582,7 @@ fn refresh_alerts(state: &mut MainState) {
         }
     }
     input.cpu_struggling = state.show_low_cpu_suggestion;
+    input.engine_disconnected = h.remote.as_ref().is_some_and(|r| !r.connected.load(Ordering::Relaxed));
     let alerts = crate::ui_logic::alerts(&input);
     for a in &alerts {
         if !state.logged_alerts.contains(&a.key) {
@@ -558,8 +605,14 @@ fn update_main(state: &mut MainState, message: Message) {
     match message {
         Message::Tick => {
             refresh_alerts(state);
-            let snapshot = state.handles.latency_log.snapshot();
-            let percentiles = compute_percentiles(snapshot);
+            // The window mirrors the engine: latency percentiles are computed there and sent over.
+            let (percentiles, speaker_percentiles) = match &state.handles.remote {
+                Some(live) => (*live.mic_pct.lock().unwrap(), *live.speaker_pct.lock().unwrap()),
+                None => (
+                    compute_percentiles(state.handles.latency_log.snapshot()),
+                    compute_percentiles(state.handles.speaker_latency_log.snapshot()),
+                ),
+            };
             // "Bypass" here means every mic-path DSP stage is currently
             // off, i.e. the mic pipeline is doing pure passthrough - a
             // reasonable, documented interpretation of `classify_status`'s
@@ -573,8 +626,6 @@ fn update_main(state: &mut MainState, message: Message) {
             state.input_level = state.handles.input_level.load();
             state.io_counters_snapshot = IoCountersSnapshot::read(&state.handles.counters);
 
-            let speaker_snapshot = state.handles.speaker_latency_log.snapshot();
-            let speaker_percentiles = compute_percentiles(speaker_snapshot);
             let speaker_all_off = !state.handles.speaker_noise.is_on()
                 && !state.handles.speaker_bvc.is_on()
                 && !state.handles.speaker_studio.is_on();
@@ -593,11 +644,13 @@ fn update_main(state: &mut MainState, message: Message) {
             if state.consecutive_overloaded_ticks >= LOW_CPU_SUGGESTION_THRESHOLD_TICKS {
                 state.show_low_cpu_suggestion = true;
             }
-            if let Some(p) = state.cpu.sample() {
-                state.cpu_percent = Some(p);
-            }
-            if crate::sysutil::take_hotkey_pressed() {
-                update_main(state, Message::ToggleMute);
+            if let Some(live) = &state.handles.remote {
+                let tenths = live.cpu_tenths.load(Ordering::Relaxed);
+                state.cpu_percent = (tenths != u32::MAX).then(|| tenths as f32 / 10.0);
+                // The engine told us it is quitting (tray > Quit): close with it.
+                if live.shutdown.load(Ordering::Relaxed) {
+                    terminate_process();
+                }
             }
         }
         Message::SelectTab(tab) => {
@@ -660,14 +713,12 @@ fn update_main(state: &mut MainState, message: Message) {
             state.settings.theme_dark = on;
             persist(&state.settings);
         }
-        Message::ToggleStartWithWindows(on) => match crate::sysutil::set_autostart(on) {
-            Ok(()) => {
-                state.settings.start_with_windows = on;
-                state.diag_note = None;
-                persist(&state.settings);
-            }
-            Err(e) => state.diag_note = Some(e),
-        },
+        Message::ToggleStartWithWindows(on) => {
+            // The engine owns the Windows sign-in entry and updates it when it saves the settings.
+            state.settings.start_with_windows = on;
+            state.diag_note = None;
+            persist(&state.settings);
+        }
         Message::ExportLogs => {
             let app_dir = crate::setup::app_data_dir();
             let dest_dir = crate::sysutil::export_dir(&app_dir);
@@ -721,7 +772,10 @@ fn update_main(state: &mut MainState, message: Message) {
             state.handles.transcript.set_enabled(on);
             persist(&state.settings);
         }
-        Message::ClearTranscript => state.handles.transcript.clear(),
+        Message::ClearTranscript => {
+            state.handles.transcript.clear();
+            crate::remote::send(crate::ipc::ClientMsg::TranscriptClear);
+        }
         Message::SelectAccentVoice(label) => {
             if let Some(i) = accent_onnx::VOICE_CHOICES.iter().position(|l| *l == label) {
                 state.settings.accent_voice = i as u8 + 1;
@@ -898,7 +952,8 @@ fn update_main(state: &mut MainState, message: Message) {
         | Message::WindowClosed
         | Message::ToggleCompact
         | Message::CopyTranscript
-        | Message::ToggleMinimizeToTray(_) => {}
+        | Message::DragWindow
+        | Message::OpenFullAt(_) => {}
     }
 }
 
@@ -940,10 +995,7 @@ fn reset_to_defaults(state: &mut MainState) {
         Message::SelectSpeakerBvcBackend(tse_engine::SpeakerBvcBackend::from_index(d.speaker_bvc_backend).name()),
     );
     state.reset_armed = false;
-    state.diag_note = Some(match crate::sysutil::set_autostart(false) {
-        Ok(()) => "Settings reset to defaults. Your device choices were kept.".to_string(),
-        Err(e) => format!("Settings reset to defaults, but {e}"),
-    });
+    state.diag_note = Some("Settings reset to defaults. Your device choices were kept.".to_string());
     persist(&state.settings);
 }
 
@@ -958,54 +1010,6 @@ fn bvc_backend_from_name(name: &str) -> Option<tse_engine::BvcBackend> {
 /// `SpeakerBvcBackend` enum.
 fn speaker_bvc_backend_from_name(name: &str) -> Option<tse_engine::SpeakerBvcBackend> {
     tse_engine::SpeakerBvcBackend::ALL.into_iter().find(|b| b.name() == name)
-}
-
-/// Same layout as `status_row`, for the speaker-outbound pipeline's own,
-/// independent telemetry (`speaker_status`/`speaker_io_counters_snapshot`)
-/// - no input-level meter here (that field only exists for the mic path).
-fn speaker_status_row(state: &MainState) -> Element<'_, Message> {
-    let color = status_color(state.speaker_status);
-    let dot = container(text("●").size(20).color(Color::from_rgb(color.r, color.g, color.b)));
-    let label = text(format!("Call audio: {}", status_label(state.speaker_status))).size(16);
-
-    let io = state.speaker_io_counters_snapshot;
-    let has_issues = io.dropped_frames > 0 || io.input_overruns > 0 || io.output_underruns > 0;
-    // The raw counters live in Advanced > Diagnostics; here only say so when something actually went wrong.
-    let mut col = column![row![dot, label].spacing(8).align_y(iced::Alignment::Center)].spacing(4);
-    if has_issues {
-        col = col.push(text("Some audio was dropped. Details are in Advanced.").size(12).style(text::warning));
-    }
-    col.into()
-}
-
-/// Same as `device_picker` for a list built on the fly (filtered to the sensible choices for this role).
-fn device_picker_of<'a>(
-    label: &'a str,
-    options: Vec<DeviceOption>,
-    selected_id: &Option<String>,
-    on_select: impl Fn(DeviceOption) -> Message + 'a,
-) -> Element<'a, Message> {
-    let selected = selected_id.as_ref().and_then(|id| options.iter().find(|d| &d.id == id).cloned());
-    column![text(label).size(14), pick_list(options, selected, on_select).placeholder("Not selected")]
-        .spacing(4)
-        .into()
-}
-
-fn device_picker<'a>(
-    label: &'a str,
-    options: &'a [DeviceOption],
-    selected_id: &Option<String>,
-    on_select: impl Fn(DeviceOption) -> Message + 'a,
-) -> Element<'a, Message> {
-    let selected = selected_id
-        .as_ref()
-        .and_then(|id| options.iter().find(|d| &d.id == id).cloned());
-    column![
-        text(label).size(14),
-        pick_list(options, selected, on_select).placeholder("Not selected"),
-    ]
-    .spacing(4)
-    .into()
 }
 
 /// Every `tse_engine::BvcBackend` name, in `BvcBackend::ALL` order - a
@@ -1115,28 +1119,30 @@ fn theme(screen: &Screen) -> iced::Theme {
         Screen::Setup(setup) => setup.settings.theme_dark,
         Screen::Main(state) => state.settings.theme_dark,
     };
-    if dark { iced::Theme::Dark } else { iced::Theme::Light }
+    style::theme(dark)
 }
 
-fn subscription(_screen: &Screen) -> Subscription<Message> {
-    Subscription::batch([
+fn subscription(screen: &Screen) -> Subscription<Message> {
+    let mut subs = vec![
         iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick),
         iced::window::close_requests().map(|_| Message::WindowClosed),
-    ])
+    ];
+    // The bar has no title bar and so no close button: Escape closes it (the engine keeps running).
+    if matches!(screen, Screen::Main(state) if state.settings.compact_mode) {
+        subs.push(iced::keyboard::listen().filter_map(|event| match event {
+            iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. } => {
+                Some(Message::WindowClosed)
+            }
+            _ => None,
+        }));
+    }
+    Subscription::batch(subs)
 }
 
-/// Runs the GUI. Blocks until the window is closed, at which point the
-/// whole process exits (no tray icon, no background daemon - per spec).
+/// Runs the window. Blocks until it is closed; the engine (a separate process) keeps running.
 pub fn run(initial: Initial) -> iced::Result {
     let (start_size, start_level) = window_size_and_level(initial.settings.compact_mode);
-    // Reconcile the Windows sign-in entry with the saved setting, and start the Ctrl+Shift+M mute hotkey.
-    if let Err(e) = crate::sysutil::set_autostart(initial.settings.start_with_windows) {
-        crate::log_error!("[clearnairt] {e}");
-    }
-    crate::sysutil::start_mute_hotkey();
-    if initial.settings.minimize_to_tray {
-        crate::tray::start();
-    }
+    let start_compact = initial.settings.compact_mode;
     let cell = RefCell::new(Some(initial));
     iced::application(
         move || {
@@ -1167,13 +1173,11 @@ pub fn run(initial: Initial) -> iced::Result {
                     keepalive: initial.keepalive,
                 })
             } else {
-                Screen::Main(MainState::new(
-                    initial.settings,
-                    initial.handles,
-                    initial.devices,
-                    warnings,
-                    initial.keepalive,
-                ))
+                let mut main = MainState::new(initial.settings, initial.handles, initial.devices, warnings, initial.keepalive);
+                main.place_panel = initial.panel_at_start;
+                main.decorated = !main.settings.compact_mode;
+                main.fit_full = !main.settings.compact_mode;
+                Screen::Main(main)
             }
         },
         update,
@@ -1183,6 +1187,24 @@ pub fn run(initial: Initial) -> iced::Result {
     .subscription(subscription)
     .theme(theme)
     .exit_on_close_request(false)
-    .window(iced::window::Settings { size: start_size, level: start_level, icon: window_icon(), ..Default::default() })
+    .style(|screen: &Screen, theme: &iced::Theme| {
+        let palette = theme.palette();
+        let compact = matches!(screen, Screen::Main(state) if state.settings.compact_mode);
+        iced::theme::Style {
+            // The collapsed bar draws its own rounded background; the window behind it must be see-through.
+            background_color: if compact { Color::TRANSPARENT } else { palette.background },
+            text_color: palette.text,
+        }
+    })
+    .window(iced::window::Settings {
+        size: start_size,
+        level: start_level,
+        icon: window_icon(),
+        decorations: !start_compact,
+        transparent: true,
+        min_size: Some(MIN_WINDOW_SIZE),
+        position: if start_compact { iced::window::Position::Default } else { iced::window::Position::Centered },
+        ..Default::default()
+    })
     .run()
 }

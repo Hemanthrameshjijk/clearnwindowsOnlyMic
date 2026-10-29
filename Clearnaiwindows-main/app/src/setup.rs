@@ -75,7 +75,7 @@ pub const ONNXRUNTIME_DLL_FILE_NAME: &str = "onnxruntime.dll";
 
 /// Result of the one-time, fast system compatibility check run at every
 /// launch (cheap enough to always redo, unlike the model download).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompatibilityReport {
     pub os_ok: bool,
     pub arch_ok: bool,

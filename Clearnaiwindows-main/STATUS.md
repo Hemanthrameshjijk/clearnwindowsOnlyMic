@@ -121,7 +121,7 @@ needed to close the loop on the claims marked unverified below.
   bundled build confirmed infeasible in this environment).
 - `crates/audio-io` — WASAPI capture/render/loopback, VB-Cable endpoint
   discovery.
-- `app` — the single `clearnairt.exe`: `iced`-based GUI + engine, one process.
+- `app` — two programs from one package: `clearnai-engine.exe` (background audio engine, tray, hotkey, settings) and `clearnai.exe` (the `iced` window), talking over a named pipe (`app/src/ipc.rs`).
 - `docs/VIRTUAL_DEVICES.md`, `docs/PACKAGING.md`, `PHASE0.md` — decisions and
   setup steps.
 

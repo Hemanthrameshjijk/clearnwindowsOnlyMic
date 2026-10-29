@@ -63,11 +63,15 @@ jobs:
         working-directory: app
         run: makensis installer.nsi
 
-      - name: Upload raw clearnairt.exe (portable, no install needed)
+      # Two programs: clearnai.exe (the window) and clearnai-engine.exe (the background engine). Keep them in the
+      # same folder; the window starts the engine if it is not running.
+      - name: Upload raw executables (portable, no install needed)
         uses: actions/upload-artifact@v4
         with:
-          name: clearnairt-windows-x64-portable
-          path: target/release/clearnairt.exe
+          name: clearnai-windows-x64-portable
+          path: |
+            target/release/clearnai.exe
+            target/release/clearnai-engine.exe
           if-no-files-found: error
 
       - name: Upload ClearNAI-Setup.exe installer

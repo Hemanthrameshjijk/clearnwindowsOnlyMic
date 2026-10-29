@@ -3,9 +3,21 @@ name = "clearnai-app"
 version.workspace = true
 edition.workspace = true
 
+# Two programs, like a noise-cancelling app with a background service:
+#   clearnai-engine.exe - audio, tray icon, hotkey, settings; no window; starts with Windows
+#   clearnai.exe        - the window; closing it never stops the audio
+# Both are thin wrappers over this package's library (src/lib.rs).
+[lib]
+name = "clearnai_app"
+path = "src/lib.rs"
+
 [[bin]]
-name = "clearnairt"
-path = "src/main.rs"
+name = "clearnai"
+path = "src/bin/clearnai.rs"
+
+[[bin]]
+name = "clearnai-engine"
+path = "src/bin/clearnai-engine.rs"
 
 [dependencies]
 # Portable foundation crate (bypass toggles, ring buffers, metrics). Builds
@@ -52,7 +64,7 @@ serde_json = "1"
 # `Application` trait/`Sandbox` API from pre-0.13 iced no longer exists).
 # The `tokio` feature is required for `iced::time::every`, which drives the
 # ~250ms status/level-meter poll.
-iced = { version = "0.14", features = ["tokio", "svg"] }
+iced = { version = "0.14", features = ["tokio", "svg", "image"] }
 
 # NOTE: the earlier `ureq` dependency for a first-run BVC model download has
 # been removed - both `weya_nc.dll` and the ONNX model bundle are now

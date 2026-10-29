@@ -154,10 +154,15 @@ pub struct AlertInput {
     pub bvc_stopped: bool,
     /// Processing has been over its time budget for several seconds.
     pub cpu_struggling: bool,
+    /// The window lost its connection to the background engine (it reconnects by itself).
+    pub engine_disconnected: bool,
 }
 
 pub fn alerts(i: &AlertInput) -> Vec<Alert> {
     let mut out = Vec::new();
+    if i.engine_disconnected {
+        out.push(Alert { key: "engine-disconnected", text: "Lost contact with the ClearNAI background engine. Reconnecting; audio keeps running if the engine is still alive.".into() });
+    }
     if i.bvc_unavailable {
         out.push(Alert { key: "bvc-unavailable", text: "Background voice removal could not start, so other voices are not being removed.".into() });
     }
@@ -177,6 +182,21 @@ pub fn alerts(i: &AlertInput) -> Vec<Alert> {
         out.push(Alert { key: "cpu", text: "This PC is struggling; audio may crackle. Try the Low CPU option in Advanced.".into() });
     }
     out
+}
+
+/// An engine warning reads "Title - details": the title is shown in bold and the details below it, starting with a
+/// capital. A warning without " - " is all details.
+pub fn split_warning(w: &str) -> (Option<&str>, String) {
+    let (title, rest) = match w.split_once(" - ") {
+        Some((a, b)) => (Some(a), b),
+        None => (None, w),
+    };
+    let mut chars = rest.chars();
+    let rest = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    (title, rest)
 }
 
 #[cfg(test)]
@@ -271,5 +291,15 @@ mod tests {
         let keys: Vec<_> = a.iter().map(|x| x.key).collect();
         assert_eq!(keys, vec!["bvc-stopped", "accent-paused"]);
         assert!(a[1].text.contains("0.93"));
+    }
+
+    #[test]
+    fn warnings_split_into_a_bold_title_and_capitalised_details() {
+        let (t, r) = split_warning("No speaker-source device selected - incoming call audio is off.");
+        assert_eq!(t, Some("No speaker-source device selected"));
+        assert_eq!(r, "Incoming call audio is off.");
+        let (t, r) = split_warning("plain warning");
+        assert_eq!((t, r.as_str()), (None, "Plain warning"));
+        assert_eq!(split_warning("").1, "");
     }
 }

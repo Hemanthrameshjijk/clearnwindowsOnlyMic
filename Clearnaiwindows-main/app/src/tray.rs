@@ -7,7 +7,10 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
+    /// The small quick panel (toggles only).
     Open,
+    /// The full window.
+    OpenFull,
     ToggleMute,
     Quit,
 }
@@ -29,6 +32,8 @@ pub fn take_actions() -> Vec<TrayAction> {
 #[cfg_attr(not(windows), allow(dead_code))]
 const ID_OPEN: &str = "clearnai-open";
 #[cfg_attr(not(windows), allow(dead_code))]
+const ID_OPEN_FULL: &str = "clearnai-open-full";
+#[cfg_attr(not(windows), allow(dead_code))]
 const ID_MUTE: &str = "clearnai-mute";
 #[cfg_attr(not(windows), allow(dead_code))]
 const ID_QUIT: &str = "clearnai-quit";
@@ -37,34 +42,50 @@ const ID_QUIT: &str = "clearnai-quit";
 fn action_for_menu_id(id: &str) -> Option<TrayAction> {
     match id {
         ID_OPEN => Some(TrayAction::Open),
+        ID_OPEN_FULL => Some(TrayAction::OpenFull),
         ID_MUTE => Some(TrayAction::ToggleMute),
         ID_QUIT => Some(TrayAction::Quit),
         _ => None,
     }
 }
 
-/// A simple generated icon (no asset file): a filled blue disc with a white "C"-less ring, `size` x `size` RGBA.
+/// The ClearNAI mark (`assets/clearnai_icon_64.rgba`, 64 x 64 straight-alpha RGBA) scaled to `size` x `size` by box
+/// averaging.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn icon_rgba(size: u32) -> Vec<u8> {
-    let c = (size as f32 - 1.0) / 2.0;
-    let (outer, inner) = (size as f32 * 0.48, size as f32 * 0.22);
-    let mut px = Vec::with_capacity((size * size * 4) as usize);
+    const SRC: &[u8] = include_bytes!("../assets/clearnai_icon_64.rgba");
+    const SRC_SIZE: usize = 64;
+    let size = size as usize;
+    let mut out = vec![0u8; size * size * 4];
     for y in 0..size {
         for x in 0..size {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            if d <= inner {
-                px.extend_from_slice(&[255, 255, 255, 255]);
-            } else if d <= outer {
-                px.extend_from_slice(&[10, 108, 240, 255]);
-            } else {
-                px.extend_from_slice(&[0, 0, 0, 0]);
+            let (x0, x1) = (x * SRC_SIZE / size, ((x + 1) * SRC_SIZE / size).max(x * SRC_SIZE / size + 1));
+            let (y0, y1) = (y * SRC_SIZE / size, ((y + 1) * SRC_SIZE / size).max(y * SRC_SIZE / size + 1));
+            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1.min(SRC_SIZE) {
+                for sx in x0..x1.min(SRC_SIZE) {
+                    let p = &SRC[(sy * SRC_SIZE + sx) * 4..][..4];
+                    // Weight colour by alpha so transparent pixels do not darken the edge.
+                    r += p[0] as u32 * p[3] as u32;
+                    g += p[1] as u32 * p[3] as u32;
+                    b += p[2] as u32 * p[3] as u32;
+                    a += p[3] as u32;
+                    n += 1;
+                }
+            }
+            let o = &mut out[(y * size + x) * 4..][..4];
+            if a > 0 {
+                o[0] = (r / a) as u8;
+                o[1] = (g / a) as u8;
+                o[2] = (b / a) as u8;
+                o[3] = (a / n.max(1)) as u8;
             }
         }
     }
-    px
+    out
 }
 
-/// Shows the tray icon (no-op if already shown). `muted` is only for the menu's first label.
+/// Shows the tray icon (no-op if already shown).
 #[cfg(windows)]
 pub fn start() {
     win::start();
@@ -83,7 +104,7 @@ pub fn stop() {}
 
 #[cfg(windows)]
 mod win {
-    use super::{action_for_menu_id, icon_rgba, push, TrayAction, ID_MUTE, ID_OPEN, ID_QUIT};
+    use super::{action_for_menu_id, icon_rgba, push, TrayAction, ID_MUTE, ID_OPEN, ID_OPEN_FULL, ID_QUIT};
     use std::sync::atomic::{AtomicU32, Ordering};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -127,11 +148,12 @@ mod win {
         }
         let spawned = std::thread::Builder::new().name("clearnai-tray".into()).spawn(|| unsafe {
             let menu = Menu::new();
-            let open = MenuItem::with_id(ID_OPEN, "Open ClearNAI", true, None);
+            let open = MenuItem::with_id(ID_OPEN, "Quick panel", true, None);
+            let open_full = MenuItem::with_id(ID_OPEN_FULL, "Open full window", true, None);
             let mute = MenuItem::with_id(ID_MUTE, "Mute / Unmute mic", true, None);
             let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
             let built = menu
-                .append_items(&[&open, &mute, &PredefinedMenuItem::separator(), &quit])
+                .append_items(&[&open, &open_full, &mute, &PredefinedMenuItem::separator(), &quit])
                 .map_err(|e| e.to_string())
                 .and_then(|_| Icon::from_rgba(icon_rgba(32), 32, 32).map_err(|e| e.to_string()))
                 .and_then(|icon| {
@@ -157,7 +179,7 @@ mod win {
                 }
             }));
             TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| match e {
-                TrayIconEvent::DoubleClick { .. } => push(TrayAction::Open),
+                TrayIconEvent::DoubleClick { .. } => push(TrayAction::OpenFull),
                 TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => push(TrayAction::Open),
                 _ => {}
             }));
@@ -193,6 +215,7 @@ mod tests {
     #[test]
     fn menu_ids_map_to_actions() {
         assert_eq!(action_for_menu_id(ID_OPEN), Some(TrayAction::Open));
+        assert_eq!(action_for_menu_id(ID_OPEN_FULL), Some(TrayAction::OpenFull));
         assert_eq!(action_for_menu_id(ID_MUTE), Some(TrayAction::ToggleMute));
         assert_eq!(action_for_menu_id(ID_QUIT), Some(TrayAction::Quit));
         assert_eq!(action_for_menu_id("other"), None);

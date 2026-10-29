@@ -163,6 +163,39 @@ impl AccentHandle {
             message: s.error.lock().map(|m| m.clone()).unwrap_or_default(),
         }
     }
+    /// For a handle that mirrors an engine running in another process: copies the engine's reported status into this
+    /// handle's atomics so [`status`](Self::status) reads the same. The voice is not touched (the UI owns it).
+    pub fn apply_remote(&self, st: &AccentStatus) {
+        let s = &self.0;
+        match st.state {
+            // Off (voice switched off in the engine): clear the "unavailable" a freshly created mirror starts with.
+            AccentState::Off => s.worker.store(W_IDLE, Relaxed),
+            AccentState::Loading => s.worker.store(W_LOADING, Relaxed),
+            AccentState::Unavailable => {
+                s.worker.store(W_FAILED, Relaxed);
+                if let Ok(mut m) = s.error.lock() {
+                    *m = st.message.clone();
+                }
+            }
+            AccentState::Starting | AccentState::Active | AccentState::Paused => {
+                s.worker.store(W_READY, Relaxed);
+                s.mic.store(
+                    match st.state {
+                        AccentState::Active => M_ACTIVE,
+                        AccentState::Paused => M_PAUSED,
+                        _ => M_STARTING,
+                    },
+                    Relaxed,
+                );
+            }
+        }
+        s.rtf_milli.store((st.rtf * 1000.0) as u32, Relaxed);
+        s.latency_x10.store((st.latency_ms * 10.0) as u32, Relaxed);
+        s.underruns.store(st.underruns, Relaxed);
+        s.jitter_ms.store(st.jitter_ms, Relaxed);
+        s.dropped_input.store(st.dropped_input, Relaxed);
+        s.catchups.store(st.catchups, Relaxed);
+    }
     /// (converter RTF, vocoder RTF) of the last measurement window.
     pub fn rtf_split(&self) -> (f32, f32) {
         (self.0.rtf_conv_milli.load(Relaxed) as f32 / 1000.0, self.0.rtf_voc_milli.load(Relaxed) as f32 / 1000.0)
@@ -471,6 +504,26 @@ impl Leveler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mirror_handle_follows_the_engine_status() {
+        let h = AccentHandle::unavailable("not started");
+        assert_eq!(h.status().state, AccentState::Unavailable);
+        let mut st = h.status();
+        st.state = AccentState::Off;
+        h.apply_remote(&st);
+        assert_eq!(h.status().state, AccentState::Off, "engine says off: the starting 'unavailable' must clear");
+        h.set_voice(1);
+        st.state = AccentState::Paused;
+        st.rtf = 0.93;
+        h.apply_remote(&st);
+        let got = h.status();
+        assert_eq!(got.state, AccentState::Paused);
+        assert!((got.rtf - 0.93).abs() < 0.01);
+        st.state = AccentState::Active;
+        h.apply_remote(&st);
+        assert_eq!(h.status().state, AccentState::Active);
+    }
 
     #[test]
     fn accent_thread_tiers_by_core_count() {
